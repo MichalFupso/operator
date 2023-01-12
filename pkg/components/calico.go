@@ -38,8 +38,8 @@ var (
 	}
 
 	ComponentCalicoNode = component{
-		Version: "master",
-		Image:   "calico/node",
+		Version: "latest-amd64",
+		Image:   "michaltigera/node",
 	}
 
 	ComponentCalicoTypha = component{
