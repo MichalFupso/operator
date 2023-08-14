@@ -1060,7 +1060,7 @@ func (r *ReconcileInstallation) Reconcile(ctx context.Context, request reconcile
 		return reconcile.Result{}, err
 	}
 	var managerInternalTLSSecret certificatemanagement.KeyPairInterface
-	if instance.Spec.Variant == operator.TigeraSecureEnterprise && managementCluster != nil {
+	if instance.Spec.Variant == operator.TigeraSecureEnterprise {
 		dnsNames := append(dns.GetServiceDNSNames(render.ManagerServiceName, render.ManagerNamespace, r.clusterDomain), render.ManagerServiceIP)
 		managerInternalTLSSecret, err = certificateManager.GetOrCreateKeyPair(r.client, render.ManagerInternalTLSSecretName, common.OperatorNamespace(), dnsNames)
 		if err != nil {
@@ -1353,6 +1353,7 @@ func (r *ReconcileInstallation) Reconcile(ctx context.Context, request reconcile
 		Installation: &instance.Spec,
 		Terminating:  terminating,
 		UsePSP:       r.usePSP,
+		OpenShift:    instance.Spec.KubernetesProvider == operator.ProviderOpenShift,
 	}
 	components = append(components, render.CSI(&csiCfg))
 
