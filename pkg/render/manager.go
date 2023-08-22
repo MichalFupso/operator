@@ -34,7 +34,6 @@ import (
 	operatorv1 "github.com/tigera/operator/api/v1"
 	"github.com/tigera/operator/pkg/common"
 	"github.com/tigera/operator/pkg/components"
-	"github.com/tigera/operator/pkg/ptr"
 	"github.com/tigera/operator/pkg/render/common/authentication"
 	tigerakvc "github.com/tigera/operator/pkg/render/common/authentication/tigera/key_validator_config"
 	"github.com/tigera/operator/pkg/render/common/configmap"
@@ -56,7 +55,6 @@ const (
 	ManagerServiceName           = "tigera-manager"
 	ManagerDeploymentName        = "tigera-manager"
 	ManagerNamespace             = "tigera-manager"
-	ManagerServiceIP             = "localhost"
 	ManagerServiceAccount        = "tigera-manager"
 	ManagerClusterRole           = "tigera-manager-role"
 	ManagerClusterRoleBinding    = "tigera-manager-binding"
@@ -263,6 +261,12 @@ func (c *managerComponent) managerDeployment() *appsv1.Deployment {
 	if c.cfg.TLSKeyPair.UseCertificateManagement() {
 		initContainers = append(initContainers, c.cfg.TLSKeyPair.InitContainer(ManagerNamespace))
 	}
+	if c.cfg.InternalTLSKeyPair != nil && c.cfg.InternalTLSKeyPair.UseCertificateManagement() {
+		initContainers = append(initContainers, c.cfg.InternalTLSKeyPair.InitContainer(ManagerNamespace))
+	}
+	if c.cfg.VoltronLinseedKeyPair != nil && c.cfg.VoltronLinseedKeyPair.UseCertificateManagement() {
+		initContainers = append(initContainers, c.cfg.VoltronLinseedKeyPair.InitContainer(ManagerNamespace))
+	}
 
 	podTemplate := relasticsearch.DecorateAnnotations(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -405,21 +409,15 @@ func (c *managerComponent) managerEnvVars() []corev1.EnvVar {
 
 // managerContainer returns the manager container.
 func (c *managerComponent) managerContainer() corev1.Container {
-	// UID 999 is used in the manager Dockerfile.
-	sc := securitycontext.NewNonRootContext()
-	sc.RunAsUser = ptr.Int64ToPtr(999)
-	sc.RunAsGroup = ptr.Int64ToPtr(0)
-
-	tm := corev1.Container{
+	return corev1.Container{
 		Name:            "tigera-manager",
 		Image:           c.managerImage,
 		ImagePullPolicy: ImagePullPolicy(),
 		Env:             c.managerEnvVars(),
 		LivenessProbe:   c.managerProbe(),
-		SecurityContext: sc,
+		SecurityContext: securitycontext.NewNonRootContext(),
 		VolumeMounts:    c.managerVolumeMounts(),
 	}
-	return tm
 }
 
 // managerOAuth2EnvVars returns the OAuth2/OIDC envvars depending on the authentication type.
@@ -532,6 +530,7 @@ func (c *managerComponent) managerEsProxyContainer() corev1.Container {
 		{Name: "FIPS_MODE_ENABLED", Value: operatorv1.IsFIPSModeEnabledString(c.cfg.Installation.FIPSMode)},
 		{Name: "LINSEED_CLIENT_CERT", Value: certPath},
 		{Name: "LINSEED_CLIENT_KEY", Value: keyPath},
+		{Name: "VOLTRON_URL", Value: "https://tigera-manager.tigera-manager.svc:9443"},
 	}
 
 	volumeMounts := append(
@@ -823,6 +822,11 @@ func (c *managerComponent) managerPodSecurityPolicy() *policyv1beta1.PodSecurity
 // Allow users to access Calico Enterprise Manager.
 func (c *managerComponent) managerAllowTigeraNetworkPolicy() *v3.NetworkPolicy {
 	egressRules := []v3.Rule{
+		{
+			Action:      v3.Allow,
+			Protocol:    &networkpolicy.TCPProtocol,
+			Destination: ManagerEntityRule,
+		},
 		{
 			Action:      v3.Allow,
 			Protocol:    &networkpolicy.TCPProtocol,
