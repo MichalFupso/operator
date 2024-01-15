@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2023 Tigera, Inc. All rights reserved.
+// Copyright (c) 2019-2024 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -128,6 +128,7 @@ type IntrusionDetectionConfiguration struct {
 	ClusterDomain      string
 	ESLicenseType      ElasticsearchLicenseType
 	ManagedCluster     bool
+	ManagementCluster  bool
 
 	HasNoLicense                 bool
 	TrustedCertBundle            certificatemanagement.TrustedBundle
@@ -138,9 +139,10 @@ type IntrusionDetectionConfiguration struct {
 }
 
 type intrusionDetectionComponent struct {
-	cfg               *IntrusionDetectionConfiguration
-	jobInstallerImage string
-	controllerImage   string
+	cfg                    *IntrusionDetectionConfiguration
+	jobInstallerImage      string
+	controllerImage        string
+	webhooksProcessorImage string
 }
 
 func (c *intrusionDetectionComponent) ResolveImages(is *operatorv1.ImageSet) error {
@@ -157,6 +159,11 @@ func (c *intrusionDetectionComponent) ResolveImages(is *operatorv1.ImageSet) err
 	}
 
 	c.controllerImage, err = components.GetReference(components.ComponentIntrusionDetectionController, reg, path, prefix, is)
+	if err != nil {
+		errMsgs = append(errMsgs, err.Error())
+	}
+
+	c.webhooksProcessorImage, err = components.GetReference(components.ComponentSecurityEventWebhooksProcessor, reg, path, prefix, is)
 	if err != nil {
 		errMsgs = append(errMsgs, err.Error())
 	}
@@ -321,13 +328,12 @@ func (c *intrusionDetectionComponent) intrusionDetectionElasticsearchJob() *batc
 			RestartPolicy:    corev1.RestartPolicyNever,
 			ImagePullSecrets: secret.GetReferenceList(c.cfg.PullSecrets),
 			Containers: []corev1.Container{
-				relasticsearch.ContainerDecorate(c.intrusionDetectionJobContainer(), c.cfg.ESClusterConfig.ClusterName(),
-					ElasticsearchIntrusionDetectionJobUserSecret, c.cfg.ClusterDomain, rmeta.OSTypeLinux),
+				c.intrusionDetectionJobContainer(),
 			},
 			Volumes:            []corev1.Volume{c.cfg.TrustedCertBundle.Volume()},
 			ServiceAccountName: IntrusionDetectionInstallerJobName,
 		},
-	}, c.cfg.ESClusterConfig, c.cfg.ESSecrets).(*corev1.PodTemplateSpec)
+	}, c.cfg.ESSecrets).(*corev1.PodTemplateSpec)
 
 	return &batchv1.Job{
 		TypeMeta: metav1.TypeMeta{Kind: "Job", APIVersion: "batch/v1"},
@@ -403,6 +409,9 @@ func (c *intrusionDetectionComponent) intrusionDetectionJobContainer() corev1.Co
 				Name:  "FIPS_MODE_ENABLED",
 				Value: operatorv1.IsFIPSModeEnabledString(c.cfg.Installation.FIPSMode),
 			},
+			relasticsearch.ElasticIndexSuffixEnvVar(c.cfg.ESClusterConfig.ClusterName()),
+			relasticsearch.ElasticUserEnvVar(ElasticsearchIntrusionDetectionJobUserSecret),
+			relasticsearch.ElasticPasswordEnvVar(ElasticsearchIntrusionDetectionJobUserSecret),
 		},
 		SecurityContext: securitycontext.NewNonRootContext(),
 		VolumeMounts:    c.cfg.TrustedCertBundle.VolumeMounts(c.SupportedOSType()),
@@ -491,6 +500,16 @@ func (c *intrusionDetectionComponent) intrusionDetectionClusterRole() *rbacv1.Cl
 				"events",
 			},
 			Verbs: []string{"get"},
+		},
+		{
+			APIGroups: []string{""},
+			Resources: []string{"secrets", "configmaps"},
+			Verbs:     []string{"get", "watch"},
+		},
+		{
+			APIGroups: []string{"crd.projectcalico.org"},
+			Resources: []string{"securityeventwebhooks"},
+			Verbs:     []string{"get", "watch", "update"},
 		},
 	}
 
@@ -610,16 +629,15 @@ func (c *intrusionDetectionComponent) intrusionDetectionRole() *rbacv1.Role {
 		},
 		Rules: []rbacv1.PolicyRule{
 			{
-				APIGroups: []string{
-					"",
-				},
-				Resources: []string{
-					"secrets",
-					"configmaps",
-				},
-				Verbs: []string{
-					"get",
-				},
+				APIGroups: []string{""},
+				Resources: []string{"secrets"},
+				Verbs:     []string{"get"},
+			},
+			{
+				// Intrusion detection forwarder snapshots its state to a specific ConfigMap.
+				APIGroups: []string{""},
+				Resources: []string{"configmaps"},
+				Verbs:     []string{"get", "create", "update"},
 			},
 		},
 	}
@@ -701,20 +719,22 @@ func (c *intrusionDetectionComponent) deploymentPodTemplate() *corev1.PodTemplat
 			})
 	}
 
-	container := relasticsearch.ContainerDecorateIndexCreator(
-		relasticsearch.ContainerDecorate(c.intrusionDetectionControllerContainer(), c.cfg.ESClusterConfig.ClusterName(),
-			ElasticsearchIntrusionDetectionUserSecret, c.cfg.ClusterDomain, rmeta.OSTypeLinux),
-		c.cfg.ESClusterConfig.Replicas(), c.cfg.ESClusterConfig.Shards())
+	intrusionDetectionContainer := c.intrusionDetectionControllerContainer()
 
 	if c.cfg.ManagedCluster {
 		envVars := []corev1.EnvVar{
 			{Name: "DISABLE_ALERTS", Value: "yes"},
 		}
-		container.Env = append(container.Env, envVars...)
+		intrusionDetectionContainer.Env = append(intrusionDetectionContainer.Env, envVars...)
 	}
 	var initContainers []corev1.Container
 	if c.cfg.IntrusionDetectionCertSecret != nil && c.cfg.IntrusionDetectionCertSecret.UseCertificateManagement() {
 		initContainers = append(initContainers, c.cfg.IntrusionDetectionCertSecret.InitContainer(IntrusionDetectionNamespace))
+	}
+
+	containers := []corev1.Container{
+		intrusionDetectionContainer,
+		c.webhooksControllerContainer(),
 	}
 
 	return relasticsearch.DecorateAnnotations(&corev1.PodTemplateSpec{
@@ -729,15 +749,58 @@ func (c *intrusionDetectionComponent) deploymentPodTemplate() *corev1.PodTemplat
 			ServiceAccountName: IntrusionDetectionName,
 			ImagePullSecrets:   ps,
 			InitContainers:     initContainers,
-			Containers: []corev1.Container{
-				container,
-			},
-			Volumes: volumes,
+			Containers:         containers,
+			Volumes:            volumes,
 		},
-	}, c.cfg.ESClusterConfig, c.cfg.ESSecrets).(*corev1.PodTemplateSpec)
+	}, c.cfg.ESSecrets).(*corev1.PodTemplateSpec)
+}
+
+func (c *intrusionDetectionComponent) webhooksControllerContainer() corev1.Container {
+	envVars := []corev1.EnvVar{
+		{
+			Name:  "LINSEED_URL",
+			Value: relasticsearch.LinseedEndpoint(c.SupportedOSType(), c.cfg.ClusterDomain, ElasticsearchNamespace),
+		},
+		{
+			Name:  "LINSEED_CA",
+			Value: c.cfg.TrustedCertBundle.MountPath(),
+		},
+		{
+			Name:  "LINSEED_CLIENT_CERT",
+			Value: c.cfg.IntrusionDetectionCertSecret.VolumeMountCertificateFilePath(),
+		},
+		{
+			Name:  "LINSEED_CLIENT_KEY",
+			Value: c.cfg.IntrusionDetectionCertSecret.VolumeMountKeyFilePath(),
+		},
+		{
+			Name:  "LINSEED_TOKEN",
+			Value: GetLinseedTokenPath(c.cfg.ManagedCluster),
+		},
+	}
+
+	volumeMounts := c.cfg.TrustedCertBundle.VolumeMounts(c.SupportedOSType())
+	volumeMounts = append(volumeMounts, c.cfg.IntrusionDetectionCertSecret.VolumeMount(c.SupportedOSType()))
+	if c.cfg.ManagedCluster {
+		volumeMounts = append(volumeMounts,
+			corev1.VolumeMount{
+				Name:      LinseedTokenVolumeName,
+				MountPath: LinseedVolumeMountPath,
+			})
+	}
+
+	return corev1.Container{
+		Name:            "webhooks-processor",
+		Image:           c.webhooksProcessorImage,
+		ImagePullPolicy: ImagePullPolicy(),
+		Env:             envVars,
+		SecurityContext: securitycontext.NewNonRootContext(),
+		VolumeMounts:    volumeMounts,
+	}
 }
 
 func (c *intrusionDetectionComponent) intrusionDetectionControllerContainer() corev1.Container {
+	esScheme, esHost, esPort, _ := url.ParseEndpoint(relasticsearch.GatewayEndpoint(c.SupportedOSType(), c.cfg.ClusterDomain, ElasticsearchNamespace))
 	envs := []corev1.EnvVar{
 		{
 			Name:  "MULTI_CLUSTER_FORWARDING_CA",
@@ -767,6 +830,13 @@ func (c *intrusionDetectionComponent) intrusionDetectionControllerContainer() co
 			Name:  "LINSEED_TOKEN",
 			Value: GetLinseedTokenPath(c.cfg.ManagedCluster),
 		},
+		relasticsearch.ElasticIndexSuffixEnvVar(c.cfg.ESClusterConfig.ClusterName()),
+		relasticsearch.ElasticUserEnvVar(ElasticsearchIntrusionDetectionUserSecret),
+		relasticsearch.ElasticPasswordEnvVar(ElasticsearchIntrusionDetectionUserSecret),
+		relasticsearch.ElasticHostEnvVar(esHost),
+		relasticsearch.ElasticPortEnvVar(esPort),
+		relasticsearch.ElasticSchemeEnvVar(esScheme),
+		relasticsearch.ElasticCAEnvVar(c.SupportedOSType()),
 	}
 
 	sc := securitycontext.NewNonRootContext()

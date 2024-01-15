@@ -64,6 +64,9 @@ components:
   intrusion-detection-controller:
     image: tigera/intrusion-detection-controller
     version: master
+  security-event-webhooks-processor:
+    image: tigera/webhooks-processor
+    version: master
   compliance-controller:
     image: tigera/compliance-controller
     version: master
@@ -103,7 +106,7 @@ components:
   # coreos-prometheus holds the version of prometheus built for tigera/prometheus,
   # which prometheus operator uses to validate.
   coreos-prometheus:
-    version: v2.43.1
+    version: v2.48.1
   prometheus:
     image: tigera/prometheus
     version: master
