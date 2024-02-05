@@ -1,4 +1,4 @@
-// Copyright (c) 2022-2023 Tigera, Inc. All rights reserved.
+// Copyright (c) 2022-2024 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -133,6 +133,9 @@ func (r *ReconcileTiers) Reconcile(ctx context.Context, request reconcile.Reques
 	reqLogger := log.WithValues("Request.Namespace", request.Namespace, "Request.Name", request.Name)
 	reqLogger.Info("Reconciling Tiers")
 
+	// Mark CR as found even though this controller is not associated with a CR, as OnCRFound() enables TigeraStatus reporting.
+	r.status.OnCRFound()
+
 	if !utils.IsAPIServerReady(r.client, reqLogger) {
 		r.status.SetDegraded(operatorv1.ResourceNotReady, "Waiting for Tigera API server to be ready", nil, reqLogger)
 		return reconcile.Result{RequeueAfter: utils.StandardRetry}, nil
@@ -167,6 +170,8 @@ func (r *ReconcileTiers) Reconcile(ctx context.Context, request reconcile.Reques
 		return reconcile.Result{}, err
 	}
 
+	r.status.ReadyToMonitor()
+	r.status.ClearDegraded()
 	return reconcile.Result{}, nil
 }
 

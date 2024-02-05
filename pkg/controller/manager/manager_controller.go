@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
+
 	operatorv1 "github.com/tigera/operator/api/v1"
 	"github.com/tigera/operator/pkg/common"
 	"github.com/tigera/operator/pkg/controller/certificatemanager"
@@ -305,7 +306,7 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 	// Ensure the allow-tigera tier exists, before rendering any network policies within it.
 	if err := r.client.Get(ctx, client.ObjectKey{Name: networkpolicy.TigeraComponentTierName}, &v3.Tier{}); err != nil {
 		if errors.IsNotFound(err) {
-			r.status.SetDegraded(operatorv1.ResourceNotReady, "Waiting for allow-tigera tier to be created", err, logc)
+			r.status.SetDegraded(operatorv1.ResourceNotReady, "Waiting for allow-tigera tier to be created, see the 'tiers' TigeraStatus for more information", err, logc)
 			return reconcile.Result{RequeueAfter: utils.StandardRetry}, nil
 		} else {
 			r.status.SetDegraded(operatorv1.ResourceReadError, "Error querying allow-tigera tier", err, logc)
@@ -378,7 +379,7 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 
 	// Determine if compliance is enabled.
 	complianceLicenseFeatureActive := utils.IsFeatureActive(license, common.ComplianceFeature)
-	complianceCR, err := compliance.GetCompliance(ctx, r.client)
+	complianceCR, err := compliance.GetCompliance(ctx, r.client, r.multiTenant, request.Namespace)
 	if err != nil && !errors.IsNotFound(err) {
 		r.status.SetDegraded(operatorv1.ResourceReadError, "Error querying compliance: ", err, logc)
 		return reconcile.Result{}, err
@@ -658,6 +659,7 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 		Replicas:                replicas,
 		Compliance:              complianceCR,
 		ComplianceLicenseActive: complianceLicenseFeatureActive,
+		ComplianceNamespace:     utils.NewNamespaceHelper(r.multiTenant, render.ComplianceNamespace, request.Namespace).InstallNamespace(),
 		UsePSP:                  r.usePSP,
 		Namespace:               helper.InstallNamespace(),
 		TruthNamespace:          helper.TruthNamespace(),

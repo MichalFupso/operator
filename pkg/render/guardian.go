@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2023 Tigera, Inc. All rights reserved.
+// Copyright (c) 2020-2024 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -421,6 +421,7 @@ func guardianAllowTigeraPolicy(cfg *GuardianConfiguration) (*v3.NetworkPolicy, e
 	egressRules = append(egressRules, v3.Rule{Action: v3.Pass})
 
 	guardianIngressDestinationEntityRule := v3.EntityRule{Ports: networkpolicy.Ports(8080)}
+	networkpolicyHelper := networkpolicy.DefaultHelper()
 	ingressRules := []v3.Rule{
 		{
 			Action:      v3.Allow,
@@ -431,25 +432,25 @@ func guardianAllowTigeraPolicy(cfg *GuardianConfiguration) (*v3.NetworkPolicy, e
 		{
 			Action:      v3.Allow,
 			Protocol:    &networkpolicy.TCPProtocol,
-			Source:      ComplianceBenchmarkerSourceEntityRule,
+			Source:      networkpolicyHelper.ComplianceBenchmarkerSourceEntityRule(),
 			Destination: guardianIngressDestinationEntityRule,
 		},
 		{
 			Action:      v3.Allow,
 			Protocol:    &networkpolicy.TCPProtocol,
-			Source:      ComplianceReporterSourceEntityRule,
+			Source:      networkpolicyHelper.ComplianceReporterSourceEntityRule(),
 			Destination: guardianIngressDestinationEntityRule,
 		},
 		{
 			Action:      v3.Allow,
 			Protocol:    &networkpolicy.TCPProtocol,
-			Source:      ComplianceSnapshotterSourceEntityRule,
+			Source:      networkpolicyHelper.ComplianceSnapshotterSourceEntityRule(),
 			Destination: guardianIngressDestinationEntityRule,
 		},
 		{
 			Action:      v3.Allow,
 			Protocol:    &networkpolicy.TCPProtocol,
-			Source:      ComplianceControllerSourceEntityRule,
+			Source:      networkpolicyHelper.ComplianceControllerSourceEntityRule(),
 			Destination: guardianIngressDestinationEntityRule,
 		},
 		{

@@ -159,6 +159,7 @@ type ManagerConfiguration struct {
 	Replicas                *int32
 	Compliance              *operatorv1.Compliance
 	ComplianceLicenseActive bool
+	ComplianceNamespace     string
 
 	// Whether the cluster supports pod security policies.
 	UsePSP            bool
@@ -166,7 +167,7 @@ type ManagerConfiguration struct {
 	TruthNamespace    string
 	BindingNamespaces []string
 
-	// Whether or not to run the rendered components in multi-tenant mode.
+	// Whether to run the rendered components in multi-tenant, single-tenant, or zero-tenant mode
 	Tenant          *operatorv1.Tenant
 	ExternalElastic bool
 
@@ -498,7 +499,7 @@ func (c *managerComponent) voltronContainer() corev1.Container {
 
 	env := []corev1.EnvVar{
 		{Name: "VOLTRON_PORT", Value: defaultVoltronPort},
-		{Name: "VOLTRON_COMPLIANCE_ENDPOINT", Value: fmt.Sprintf("https://compliance.%s.svc.%s", ComplianceNamespace, c.cfg.ClusterDomain)},
+		{Name: "VOLTRON_COMPLIANCE_ENDPOINT", Value: fmt.Sprintf("https://compliance.%s.svc.%s", c.cfg.ComplianceNamespace, c.cfg.ClusterDomain)},
 		{Name: "VOLTRON_LOGLEVEL", Value: "Info"},
 		{Name: "VOLTRON_KIBANA_ENDPOINT", Value: rkibana.HTTPSEndpoint(c.SupportedOSType(), c.cfg.ClusterDomain)},
 		{Name: "VOLTRON_KIBANA_BASE_PATH", Value: fmt.Sprintf("/%s/", KibanaBasePath)},
@@ -891,11 +892,12 @@ func (c *managerComponent) getTLSObjects() []client.Object {
 
 // Allow users to access Calico Enterprise Manager.
 func (c *managerComponent) managerAllowTigeraNetworkPolicy() *v3.NetworkPolicy {
+	networkpolicyHelper := networkpolicy.Helper(c.cfg.Tenant.MultiTenant(), c.cfg.Namespace)
 	egressRules := []v3.Rule{
 		{
 			Action:      v3.Allow,
 			Protocol:    &networkpolicy.TCPProtocol,
-			Destination: networkpolicy.Helper(c.cfg.Tenant.MultiTenant(), c.cfg.Namespace).ManagerEntityRule(),
+			Destination: networkpolicyHelper.ManagerEntityRule(),
 		},
 		{
 			Action:      v3.Allow,
@@ -906,18 +908,18 @@ func (c *managerComponent) managerAllowTigeraNetworkPolicy() *v3.NetworkPolicy {
 			Action:      v3.Allow,
 			Protocol:    &networkpolicy.TCPProtocol,
 			Source:      v3.EntityRule{},
-			Destination: networkpolicy.Helper(c.cfg.Tenant.MultiTenant(), c.cfg.Namespace).ESGatewayEntityRule(),
+			Destination: networkpolicyHelper.ESGatewayEntityRule(),
 		},
 		{
 			Action:      v3.Allow,
 			Protocol:    &networkpolicy.TCPProtocol,
 			Source:      v3.EntityRule{},
-			Destination: networkpolicy.Helper(c.cfg.Tenant.MultiTenant(), c.cfg.Namespace).LinseedEntityRule(),
+			Destination: networkpolicyHelper.LinseedEntityRule(),
 		},
 		{
 			Action:      v3.Allow,
 			Protocol:    &networkpolicy.TCPProtocol,
-			Destination: ComplianceServerEntityRule,
+			Destination: networkpolicyHelper.ComplianceServerEntityRule(),
 		},
 		{
 			Action:      v3.Allow,
