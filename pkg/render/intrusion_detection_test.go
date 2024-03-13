@@ -17,10 +17,6 @@ package render_test
 import (
 	"fmt"
 
-	"github.com/tigera/operator/pkg/render/common/networkpolicy"
-
-	"github.com/tigera/operator/pkg/common"
-
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
@@ -29,23 +25,28 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
+
 	operatorv1 "github.com/tigera/operator/api/v1"
 	"github.com/tigera/operator/pkg/apis"
+	"github.com/tigera/operator/pkg/common"
 	"github.com/tigera/operator/pkg/controller/certificatemanager"
+	ctrlrfake "github.com/tigera/operator/pkg/ctrlruntime/client/fake"
 	"github.com/tigera/operator/pkg/dns"
 	"github.com/tigera/operator/pkg/render"
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
+	"github.com/tigera/operator/pkg/render/common/networkpolicy"
 	rtest "github.com/tigera/operator/pkg/render/common/test"
 	"github.com/tigera/operator/pkg/render/testutils"
 	"github.com/tigera/operator/pkg/tls"
 	"github.com/tigera/operator/pkg/tls/certificatemanagement"
+	"github.com/tigera/operator/test"
 )
 
 var (
@@ -76,7 +77,7 @@ var _ = Describe("Intrusion Detection rendering tests", func() {
 	BeforeEach(func() {
 		scheme := runtime.NewScheme()
 		Expect(apis.AddToScheme(scheme)).NotTo(HaveOccurred())
-		cli = fake.NewClientBuilder().WithScheme(scheme).Build()
+		cli = ctrlrfake.DefaultFakeClientBuilder(scheme).Build()
 
 		certificateManager, err := certificatemanager.Create(cli, nil, clusterDomain, common.OperatorNamespace(), certificatemanager.AllowCACreation())
 		Expect(err).NotTo(HaveOccurred())
@@ -487,7 +488,7 @@ var _ = Describe("Intrusion Detection rendering tests", func() {
 		fipsEnabled := operatorv1.FIPSModeEnabled
 		testADStorageClassName := "test-storage-class-name"
 		cfg.Installation.FIPSMode = &fipsEnabled
-		cfg.IntrusionDetection = operatorv1.IntrusionDetection{
+		cfg.IntrusionDetection = &operatorv1.IntrusionDetection{
 			Spec: operatorv1.IntrusionDetectionSpec{
 				AnomalyDetection: operatorv1.AnomalyDetectionSpec{
 					StorageClassName: testADStorageClassName,
@@ -611,6 +612,105 @@ var _ = Describe("Intrusion Detection rendering tests", func() {
 		Expect(csrInitContainer.Name).To(Equal(fmt.Sprintf("%v-key-cert-provisioner", render.IntrusionDetectionTLSSecretName)))
 	})
 
+	It("should render container and init container with resource requests/limits when configured", func() {
+
+		intrusionDetectionResources := corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				"cpu":     resource.MustParse("2"),
+				"memory":  resource.MustParse("300Mi"),
+				"storage": resource.MustParse("20Gi"),
+			},
+			Requests: corev1.ResourceList{
+				"cpu":     resource.MustParse("1"),
+				"memory":  resource.MustParse("150Mi"),
+				"storage": resource.MustParse("10Gi"),
+			},
+		}
+
+		ca, _ := tls.MakeCA(rmeta.DefaultOperatorCASignerName())
+		cert, _, _ := ca.Config.GetPEMBytes() // create a valid pem block
+		cfg.Installation.CertificateManagement = &operatorv1.CertificateManagement{CACert: cert}
+
+		certificateManager, err := certificatemanager.Create(cli, cfg.Installation, clusterDomain, common.OperatorNamespace(), certificatemanager.AllowCACreation())
+		Expect(err).NotTo(HaveOccurred())
+
+		intrusionDetectionCertSecret, err := certificateManager.GetOrCreateKeyPair(cli, render.IntrusionDetectionTLSSecretName, common.OperatorNamespace(), []string{""})
+		Expect(err).NotTo(HaveOccurred())
+		cfg.IntrusionDetectionCertSecret = intrusionDetectionCertSecret
+		cfg.IntrusionDetection = &operatorv1.IntrusionDetection{
+			Spec: operatorv1.IntrusionDetectionSpec{
+				IntrusionDetectionControllerDeployment: &operatorv1.IntrusionDetectionControllerDeployment{
+					Spec: &operatorv1.IntrusionDetectionControllerDeploymentSpec{
+						Template: &operatorv1.IntrusionDetectionControllerDeploymentPodTemplateSpec{
+							Spec: &operatorv1.IntrusionDetectionControllerDeploymentPodSpec{
+								Containers: []operatorv1.IntrusionDetectionControllerDeploymentContainer{{
+									Name:      "controller",
+									Resources: &intrusionDetectionResources,
+								}},
+								InitContainers: []operatorv1.IntrusionDetectionControllerDeploymentInitContainer{{
+									Name:      "tigera-dex-tls-key-cert-provisioner",
+									Resources: &intrusionDetectionResources,
+								}},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		component := render.IntrusionDetection(cfg)
+		toCreate, _ := component.Objects()
+
+		intrusionDetectionDeploy := rtest.GetResource(toCreate, "intrusion-detection-controller", "tigera-intrusion-detection", "apps", "v1", "Deployment").(*appsv1.Deployment)
+		Expect(intrusionDetectionDeploy.Spec.Template.Spec.InitContainers).To(HaveLen(1))
+		csrInitContainer := intrusionDetectionDeploy.Spec.Template.Spec.InitContainers[0]
+		Expect(csrInitContainer.Name).To(Equal(fmt.Sprintf("%v-key-cert-provisioner", render.IntrusionDetectionTLSSecretName)))
+
+		// Should set requests/limits for controller container
+		Expect(intrusionDetectionDeploy.Spec.Template.Spec.Containers).To(HaveLen(2))
+		container := test.GetContainer(intrusionDetectionDeploy.Spec.Template.Spec.Containers, "controller")
+		Expect(container).NotTo(BeNil())
+		Expect(container.Resources).To(Equal(intrusionDetectionResources))
+
+		// Should not update for container webhooks-processor
+		container = test.GetContainer(intrusionDetectionDeploy.Spec.Template.Spec.Containers, "webhooks-processor")
+		Expect(container).NotTo(BeNil())
+		Expect(container.Resources).To(Equal(corev1.ResourceRequirements{}))
+	})
+
+	It("should render configuration with default Init container resource requests and limits", func() {
+		ca, _ := tls.MakeCA(rmeta.DefaultOperatorCASignerName())
+		cert, _, _ := ca.Config.GetPEMBytes() // create a valid pem block
+		cfg.Installation.CertificateManagement = &operatorv1.CertificateManagement{CACert: cert}
+
+		certificateManager, err := certificatemanager.Create(cli, cfg.Installation, clusterDomain, common.OperatorNamespace(), certificatemanager.AllowCACreation())
+		Expect(err).NotTo(HaveOccurred())
+
+		intrusionDetectionCertSecret, err := certificateManager.GetOrCreateKeyPair(cli, render.IntrusionDetectionTLSSecretName, common.OperatorNamespace(), []string{""})
+		Expect(err).NotTo(HaveOccurred())
+		cfg.IntrusionDetectionCertSecret = intrusionDetectionCertSecret
+
+		component := render.IntrusionDetection(cfg)
+		toCreate, _ := component.Objects()
+		intrusionDetectionDeploy, ok := rtest.GetResource(toCreate, "intrusion-detection-controller", "tigera-intrusion-detection", "apps", "v1", "Deployment").(*appsv1.Deployment)
+		Expect(ok).To(BeTrue())
+		Expect(intrusionDetectionDeploy.Spec.Template.Spec.InitContainers).To(HaveLen(1))
+
+		initContainer := test.GetContainer(intrusionDetectionDeploy.Spec.Template.Spec.InitContainers, "intrusion-detection-tls-key-cert-provisioner")
+		Expect(initContainer).NotTo(BeNil())
+		Expect(initContainer.Resources).To(Equal(corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				"cpu":    resource.MustParse("10m"),
+				"memory": resource.MustParse("50Mi"),
+			},
+			Requests: corev1.ResourceList{
+				"cpu":    resource.MustParse("10m"),
+				"memory": resource.MustParse("50Mi"),
+			},
+		}))
+
+	})
+
 	Context("multi-tenant rendering", func() {
 		tenantANamespace := "tenant-a-ns"
 		tenantBNamespace := "tenant-b-ns"
@@ -620,11 +720,14 @@ var _ = Describe("Intrusion Detection rendering tests", func() {
 			// Configure a tenant.
 			tenantA = &operatorv1.Tenant{
 				ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: tenantANamespace},
-				Spec:       operatorv1.TenantSpec{},
+				Spec: operatorv1.TenantSpec{
+					ID: "tenant-a",
+				},
 			}
 			cfg.Namespace = tenantANamespace
 			cfg.BindNamespaces = []string{tenantANamespace, tenantBNamespace}
 			cfg.Tenant = tenantA
+			cfg.ExternalElastic = true
 		})
 
 		It("should render multi-tenant resources", func() {
@@ -687,6 +790,21 @@ var _ = Describe("Intrusion Detection rendering tests", func() {
 				},
 			}
 			Expect(netpol.Spec.Egress).To(ConsistOf(expectedEgressRules))
+		})
+
+		It("should render multi-tenant environment variables", func() {
+			component := render.IntrusionDetection(cfg)
+			toCreate, _ := component.Objects()
+
+			deployment, err := rtest.GetResourceOfType[*appsv1.Deployment](toCreate, render.IntrusionDetectionName, tenantANamespace)
+			Expect(err).NotTo(HaveOccurred())
+
+			envs := deployment.Spec.Template.Spec.Containers[0].Env
+			Expect(envs).To(ContainElement(corev1.EnvVar{Name: "TENANT_NAMESPACE", Value: tenantANamespace}))
+			Expect(envs).To(ContainElement(corev1.EnvVar{Name: "TENANT_ID", Value: "tenant-a"}))
+			Expect(envs).To(ContainElement(corev1.EnvVar{Name: "LINSEED_URL", Value: fmt.Sprintf("https://tigera-linseed.%s.svc", tenantANamespace)}))
+			Expect(envs).To(ContainElement(corev1.EnvVar{Name: "MULTI_CLUSTER_FORWARDING_ENDPOINT", Value: fmt.Sprintf("https://tigera-manager.%s.svc:9443", tenantANamespace)}))
+
 		})
 	})
 })

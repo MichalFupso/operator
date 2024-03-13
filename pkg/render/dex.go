@@ -34,6 +34,7 @@ import (
 	operatorv1 "github.com/tigera/operator/api/v1"
 	"github.com/tigera/operator/pkg/common"
 	"github.com/tigera/operator/pkg/components"
+	rcomponents "github.com/tigera/operator/pkg/render/common/components"
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
 	"github.com/tigera/operator/pkg/render/common/networkpolicy"
 	"github.com/tigera/operator/pkg/render/common/podaffinity"
@@ -75,6 +76,8 @@ type DexComponentConfiguration struct {
 
 	// Whether the cluster supports pod security policies.
 	UsePSP bool
+
+	Authentication *operatorv1.Authentication
 }
 
 type dexComponent struct {
@@ -291,6 +294,12 @@ func (c *dexComponent) deployment() client.Object {
 		d.Spec.Template.Spec.Affinity = podaffinity.NewPodAntiAffinity(DexObjectName, DexNamespace)
 	}
 
+	if c.cfg.Authentication != nil {
+		if overrides := c.cfg.Authentication.Spec.DexDeployment; overrides != nil {
+			rcomponents.ApplyDeploymentOverrides(d, overrides)
+		}
+	}
+
 	return d
 }
 
@@ -363,9 +372,13 @@ func (c *dexComponent) configMap() *corev1.ConfigMap {
 				"secretEnv":    dexSecretEnv,
 			},
 		},
+		"expiry": map[string]string{
+			// Default duration is 24h. This is too high for most organizations. Setting it to 15m.
+			"idTokens": "15m",
+		},
 	})
 	if err != nil {
-		// Panic since this this would be a developer error, as the marshaled struct is one created by our code.
+		// Panic since this would be a developer error, as the marshaled struct is one created by our code.
 		panic(err)
 	}
 	return &corev1.ConfigMap{

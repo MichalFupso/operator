@@ -155,10 +155,6 @@ func validateCustomResource(instance *operatorv1.Installation) error {
 			}
 		}
 
-		if bpfDataplane && v4pool != nil && v6pool != nil {
-			return fmt.Errorf("bpf dataplane does not support dual stack")
-		}
-
 		if v4pool != nil {
 			_, cidr, err := net.ParseCIDR(v4pool.CIDR)
 			if err != nil {
@@ -348,6 +344,20 @@ func validateCustomResource(instance *operatorv1.Installation) error {
 				return err
 			}
 
+		}
+
+		if instance.Spec.CalicoNetwork.LinuxPolicySetupTimeoutSeconds != nil {
+			// Pod readiness delays.
+			if *instance.Spec.CalicoNetwork.LinuxPolicySetupTimeoutSeconds < 0 {
+				return fmt.Errorf("spec.calicoNetwork.linuxPolicySetupTimeoutSeconds negative value is not valid")
+			}
+			if instance.Spec.CalicoNetwork.LinuxDataplane == nil {
+				return fmt.Errorf("spec.calicoNetwork.linuxPolicySetupTimeoutSeconds requires the Iptables Linux dataplane to be set")
+			}
+			if *instance.Spec.CalicoNetwork.LinuxDataplane != operatorv1.LinuxDataplaneIptables &&
+				*instance.Spec.CalicoNetwork.LinuxDataplane != operatorv1.LinuxDataplaneBPF {
+				return fmt.Errorf("spec.calicoNetwork.linuxPolicySetupTimeoutSeconds is supported only for the Iptables and BPF Linux dataplanes")
+			}
 		}
 	}
 

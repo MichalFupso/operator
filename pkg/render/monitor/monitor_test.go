@@ -20,7 +20,9 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
+
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	k8sresource "k8s.io/apimachinery/pkg/api/resource"
@@ -28,9 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-
-	"github.com/tigera/operator/pkg/ptr"
 
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
 
@@ -39,7 +38,9 @@ import (
 	"github.com/tigera/operator/pkg/common"
 	"github.com/tigera/operator/pkg/components"
 	"github.com/tigera/operator/pkg/controller/certificatemanager"
+	ctrlrfake "github.com/tigera/operator/pkg/ctrlruntime/client/fake"
 	"github.com/tigera/operator/pkg/dns"
+	"github.com/tigera/operator/pkg/ptr"
 	"github.com/tigera/operator/pkg/render"
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
 	rtest "github.com/tigera/operator/pkg/render/common/test"
@@ -76,7 +77,7 @@ var _ = Describe("monitor rendering tests", func() {
 	BeforeEach(func() {
 		scheme := runtime.NewScheme()
 		Expect(apis.AddToScheme(scheme)).NotTo(HaveOccurred())
-		cli := fake.NewClientBuilder().WithScheme(scheme).Build()
+		cli := ctrlrfake.DefaultFakeClientBuilder(scheme).Build()
 
 		certificateManager, err := certificatemanager.Create(cli, nil, dns.DefaultClusterDomain, common.OperatorNamespace(), certificatemanager.AllowCACreation())
 		Expect(err).NotTo(HaveOccurred())
@@ -127,6 +128,70 @@ var _ = Describe("monitor rendering tests", func() {
 
 		service := rtest.GetResource(toCreate, "prometheus-http-api", "tigera-prometheus", "", "v1", "Service").(*corev1.Service)
 		Expect(service.Labels["k8s-app"]).To(Equal("tigera-prometheus"))
+	})
+
+	It("Should render Prometheus resources with resources requests and limits", func() {
+
+		prometheusResources := corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				"cpu":    k8sresource.MustParse("1"),
+				"memory": k8sresource.MustParse("500Mi"),
+			},
+			Requests: corev1.ResourceList{
+				"cpu":    k8sresource.MustParse("101m"),
+				"memory": k8sresource.MustParse("100Mi"),
+			},
+		}
+		alertManagerResources := corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				"cpu":    k8sresource.MustParse("601m"),
+				"memory": k8sresource.MustParse("600Mi"),
+			},
+			Requests: corev1.ResourceList{
+				"cpu":    k8sresource.MustParse("201m"),
+				"memory": k8sresource.MustParse("200Mi"),
+			},
+		}
+
+		cfg.Monitor.Prometheus = &operatorv1.Prometheus{
+			PrometheusSpec: &operatorv1.PrometheusSpec{
+				CommonPrometheusFields: &operatorv1.CommonPrometheusFields{
+					Containers: []operatorv1.PrometheusContainer{{
+						Name:      "authn-proxy",
+						Resources: &prometheusResources,
+					},
+					},
+					Resources: prometheusResources,
+				},
+			},
+		}
+
+		cfg.Monitor.AlertManager = &operatorv1.AlertManager{
+			AlertManagerSpec: &operatorv1.AlertManagerSpec{
+				Resources: alertManagerResources,
+			},
+		}
+
+		component := monitor.Monitor(cfg)
+		Expect(component.ResolveImages(nil)).NotTo(HaveOccurred())
+		toCreate, toDelete := component.Objects()
+		Expect(toDelete).To(HaveLen(3))
+
+		// Prometheus
+		prometheusObj, ok := rtest.GetResource(toCreate, monitor.CalicoNodePrometheus, common.TigeraPrometheusNamespace, "monitoring.coreos.com", "v1", monitoringv1.PrometheusesKind).(*monitoringv1.Prometheus)
+		Expect(ok).To(BeTrue())
+
+		Expect(prometheusObj.Spec.CommonPrometheusFields.Containers).To(HaveLen(1))
+		Expect(prometheusObj.Spec.CommonPrometheusFields.Containers[0].Name).To(Equal("authn-proxy"))
+		Expect(prometheusObj.Spec.CommonPrometheusFields.Containers[0].Resources).To(Equal(prometheusResources))
+
+		Expect(prometheusObj.Spec.CommonPrometheusFields.Resources).To(Equal(prometheusResources))
+
+		// AlertManager
+		alertmanagerObj, ok := rtest.GetResource(toCreate, monitor.CalicoNodeAlertmanager, common.TigeraPrometheusNamespace, "monitoring.coreos.com", "v1", monitoringv1.AlertmanagersKind).(*monitoringv1.Alertmanager)
+		Expect(ok).To(BeTrue())
+		Expect(alertmanagerObj.Spec.Resources).To(Equal(alertManagerResources))
+
 	})
 
 	It("Should render Prometheus resource Specs correctly", func() {

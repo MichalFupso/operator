@@ -54,7 +54,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
 	operator "github.com/tigera/operator/api/v1"
@@ -71,6 +70,7 @@ import (
 	"github.com/tigera/operator/pkg/controller/utils"
 	"github.com/tigera/operator/pkg/controller/utils/imageset"
 	"github.com/tigera/operator/pkg/crds"
+	"github.com/tigera/operator/pkg/ctrlruntime"
 	"github.com/tigera/operator/pkg/dns"
 	"github.com/tigera/operator/pkg/render"
 	rcertificatemanagement "github.com/tigera/operator/pkg/render/certificatemanagement"
@@ -130,7 +130,7 @@ func Add(mgr manager.Manager, opts options.AddOptions) error {
 		return fmt.Errorf("failed to create Core Reconciler: %w", err)
 	}
 
-	c, err := controller.New("tigera-installation-controller", mgr, controller.Options{Reconciler: ri})
+	c, err := ctrlruntime.NewController("tigera-installation-controller", mgr, controller.Options{Reconciler: ri})
 	if err != nil {
 		return fmt.Errorf("Failed to create tigera-installation-controller: %w", err)
 	}
@@ -201,9 +201,9 @@ func newReconciler(mgr manager.Manager, opts options.AddOptions) (*ReconcileInst
 }
 
 // add adds watches for resources that are available at startup
-func add(c controller.Controller, r *ReconcileInstallation) error {
+func add(c ctrlruntime.Controller, r *ReconcileInstallation) error {
 	// Watch for changes to primary resource Installation
-	err := c.Watch(&source.Kind{Type: &operator.Installation{}}, &handler.EnqueueRequestForObject{})
+	err := c.WatchObject(&operator.Installation{}, &handler.EnqueueRequestForObject{})
 	if err != nil {
 		return fmt.Errorf("tigera-installation-controller failed to watch primary resource: %w", err)
 	}
@@ -216,7 +216,7 @@ func add(c controller.Controller, r *ReconcileInstallation) error {
 	if r.autoDetectedProvider == operator.ProviderOpenShift {
 		// Watch for openshift network configuration as well. If we're running in OpenShift, we need to
 		// merge this configuration with our own and the write back the status object.
-		err = c.Watch(&source.Kind{Type: &configv1.Network{}}, &handler.EnqueueRequestForObject{})
+		err = c.WatchObject(&configv1.Network{}, &handler.EnqueueRequestForObject{})
 		if err != nil {
 			if !apierrors.IsNotFound(err) {
 				return fmt.Errorf("tigera-installation-controller failed to watch openshift network config: %w", err)
@@ -244,7 +244,7 @@ func add(c controller.Controller, r *ReconcileInstallation) error {
 
 	// Only watch the AmazonCloudIntegration if the CRD is available
 	if r.amazonCRDExists {
-		err = c.Watch(&source.Kind{Type: &operator.AmazonCloudIntegration{}}, &handler.EnqueueRequestForObject{})
+		err = c.WatchObject(&operator.AmazonCloudIntegration{}, &handler.EnqueueRequestForObject{})
 		if err != nil {
 			log.V(5).Info("Failed to create AmazonCloudIntegration watch", "err", err)
 			return fmt.Errorf("amazoncloudintegration-controller failed to watch primary resource: %w", err)
@@ -262,38 +262,38 @@ func add(c controller.Controller, r *ReconcileInstallation) error {
 	}
 
 	// Watch for changes to KubeControllersConfiguration.
-	err = c.Watch(&source.Kind{Type: &crdv1.KubeControllersConfiguration{}}, &handler.EnqueueRequestForObject{})
+	err = c.WatchObject(&crdv1.KubeControllersConfiguration{}, &handler.EnqueueRequestForObject{})
 	if err != nil {
 		return fmt.Errorf("tigera-installation-controller failed to watch KubeControllersConfiguration resource: %w", err)
 	}
 
 	// Watch for changes to FelixConfiguration.
-	err = c.Watch(&source.Kind{Type: &crdv1.FelixConfiguration{}}, &handler.EnqueueRequestForObject{})
+	err = c.WatchObject(&crdv1.FelixConfiguration{}, &handler.EnqueueRequestForObject{})
 	if err != nil {
 		return fmt.Errorf("tigera-installation-controller failed to watch FelixConfiguration resource: %w", err)
 	}
 
 	// Watch for changes to BGPConfiguration.
-	err = c.Watch(&source.Kind{Type: &crdv1.BGPConfiguration{}}, &handler.EnqueueRequestForObject{})
+	err = c.WatchObject(&crdv1.BGPConfiguration{}, &handler.EnqueueRequestForObject{})
 	if err != nil {
 		return fmt.Errorf("tigera-installation-controller failed to watch BGPConfiguration resource: %w", err)
 	}
 
 	if r.enterpriseCRDsExist {
 		// Watch for changes to primary resource ManagementCluster
-		err = c.Watch(&source.Kind{Type: &operator.ManagementCluster{}}, &handler.EnqueueRequestForObject{})
+		err = c.WatchObject(&operator.ManagementCluster{}, &handler.EnqueueRequestForObject{})
 		if err != nil {
 			return fmt.Errorf("tigera-installation-controller failed to watch primary resource: %v", err)
 		}
 
 		// Watch for changes to primary resource ManagementClusterConnection
-		err = c.Watch(&source.Kind{Type: &operator.ManagementClusterConnection{}}, &handler.EnqueueRequestForObject{})
+		err = c.WatchObject(&operator.ManagementClusterConnection{}, &handler.EnqueueRequestForObject{})
 		if err != nil {
 			return fmt.Errorf("tigera-installation-controller failed to watch primary resource: %v", err)
 		}
 
 		// watch for change to primary resource LogCollector
-		err = c.Watch(&source.Kind{Type: &operator.LogCollector{}}, &handler.EnqueueRequestForObject{})
+		err = c.WatchObject(&operator.LogCollector{}, &handler.EnqueueRequestForObject{})
 		if err != nil {
 			return fmt.Errorf("tigera-installation-controller failed to watch primary resource: %v", err)
 		}
@@ -655,6 +655,13 @@ func fillDefaults(instance *operator.Installation) error {
 				FirstFound: &t,
 			}
 		}
+	}
+
+	if instance.Spec.CNI.Type == operator.PluginCalico &&
+		*instance.Spec.CalicoNetwork.LinuxDataplane == operator.LinuxDataplaneIptables &&
+		instance.Spec.CalicoNetwork.LinuxPolicySetupTimeoutSeconds == nil {
+		var delay int32 = 0
+		instance.Spec.CalicoNetwork.LinuxPolicySetupTimeoutSeconds = &delay
 	}
 
 	if v6pool != nil {
@@ -1143,8 +1150,8 @@ func (r *ReconcileInstallation) Reconcile(ctx context.Context, request reconcile
 	}
 
 	// Set any non-default FelixConfiguration values that we need.
-	felixConfiguration, err := utils.PatchFelixConfiguration(ctx, r.client, func(fc *crdv1.FelixConfiguration) bool {
-		return r.setDefaultsOnFelixConfiguration(instance, fc)
+	felixConfiguration, err := utils.PatchFelixConfiguration(ctx, r.client, func(fc *crdv1.FelixConfiguration) (bool, error) {
+		return r.setDefaultsOnFelixConfiguration(ctx, instance, fc, reqLogger)
 	})
 	if err != nil {
 		return reconcile.Result{}, err
@@ -1419,8 +1426,8 @@ func (r *ReconcileInstallation) Reconcile(ctx context.Context, request reconcile
 
 	// TODO: We handle too many components in this controller at the moment. Once we are done consolidating,
 	// we can have the CreateOrUpdate logic handle this for us.
-	r.status.AddDaemonsets([]types.NamespacedName{{Name: "calico-node", Namespace: "calico-system"}})
-	r.status.AddDeployments([]types.NamespacedName{{Name: "calico-kube-controllers", Namespace: "calico-system"}})
+	r.status.AddDaemonsets([]types.NamespacedName{{Name: common.NodeDaemonSetName, Namespace: common.CalicoNamespace}})
+	r.status.AddDeployments([]types.NamespacedName{{Name: common.KubeControllersDeploymentName, Namespace: common.CalicoNamespace}})
 	certificateManager.AddToStatusManager(r.status, common.CalicoNamespace)
 
 	// Run this after we have rendered our components so the new (operator created)
@@ -1488,6 +1495,16 @@ func (r *ReconcileInstallation) Reconcile(ctx context.Context, request reconcile
 
 	// Tell the status manager that we're ready to monitor the resources we've told it about and receive statuses.
 	r.status.ReadyToMonitor()
+
+	// If eBPF is enabled in the operator API, patch FelixConfiguration to enable it within Felix.
+	_, err = utils.PatchFelixConfiguration(ctx, r.client, func(fc *crdv1.FelixConfiguration) (bool, error) {
+		return r.setBPFUpdatesOnFelixConfiguration(ctx, instance, fc, reqLogger)
+	})
+
+	if err != nil {
+		r.status.SetDegraded(operator.ResourceUpdateError, "Error updating resource", err, reqLogger)
+		return reconcile.Result{}, err
+	}
 
 	// We can clear the degraded state now since as far as we know everything is in order.
 	r.status.ClearDegraded()
@@ -1618,7 +1635,7 @@ func getOrCreateTyphaNodeTLSConfig(cli client.Client, certificateManager certifi
 
 // setDefaultOnFelixConfiguration will take the passed in fc and add any defaulting needed
 // based on the install config.
-func (r *ReconcileInstallation) setDefaultsOnFelixConfiguration(install *operator.Installation, fc *crdv1.FelixConfiguration) bool {
+func (r *ReconcileInstallation) setDefaultsOnFelixConfiguration(ctx context.Context, install *operator.Installation, fc *crdv1.FelixConfiguration, reqLogger logr.Logger) (bool, error) {
 	updated := false
 
 	switch install.Spec.CNI.Type {
@@ -1696,7 +1713,75 @@ func (r *ReconcileInstallation) setDefaultsOnFelixConfiguration(install *operato
 			}
 		}
 	}
-	return updated
+
+	// If BPF is enabled, but not set on FelixConfiguration, do so here. This could happen when an older
+	// version of operator is replaced by the new one. Older versions of the operator used an
+	// environment variable to enable BPF, but we no longer do so. In order to prevent disruption
+	// when the environment variable is removed by the render code of the new operator, make sure
+	// FelixConfiguration has the correct value set.
+
+	// If calico-node daemonset exists, we need to check the ENV VAR and set FelixConfiguration accordingly.
+	// Otherwise, just move on.
+	ds := &appsv1.DaemonSet{}
+	err := r.client.Get(ctx, types.NamespacedName{Namespace: common.CalicoNamespace, Name: common.NodeDaemonSetName}, ds)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			reqLogger.Error(err, "An error occurred when getting the Daemonset resource")
+			return false, err
+		}
+	} else {
+		bpfEnabledOnDaemonsetWithEnvVar, err := bpfEnabledOnDaemonsetWithEnvVar(ds)
+		if err != nil {
+			reqLogger.Error(err, "An error occurred when querying the Daemonset resource")
+			return false, err
+		} else if bpfEnabledOnDaemonsetWithEnvVar && !bpfEnabledOnFelixConfig(fc) {
+			err = setBPFEnabledOnFelixConfiguration(fc, true)
+			if err != nil {
+				reqLogger.Error(err, "Unable to enable eBPF data plane")
+				return false, err
+			} else {
+				updated = true
+			}
+		}
+	}
+
+	return updated, nil
+}
+
+// setBPFUpdatesOnFelixConfiguration will take the passed in fc and update any BPF properties needed
+// based on the install config and the daemonset.
+func (r *ReconcileInstallation) setBPFUpdatesOnFelixConfiguration(ctx context.Context, install *operator.Installation, fc *crdv1.FelixConfiguration, reqLogger logr.Logger) (bool, error) {
+	updated := false
+
+	bpfEnabledOnInstall := install.Spec.BPFEnabled()
+	if bpfEnabledOnInstall {
+		ds := &appsv1.DaemonSet{}
+		err := r.client.Get(ctx, types.NamespacedName{Namespace: common.CalicoNamespace, Name: common.NodeDaemonSetName}, ds)
+		if err != nil {
+			return false, err
+		}
+		if !bpfEnabledOnFelixConfig(fc) && isRolloutCompleteWithBPFVolumes(ds) {
+			err := setBPFEnabledOnFelixConfiguration(fc, bpfEnabledOnInstall)
+			if err != nil {
+				reqLogger.Error(err, "Unable to enable eBPF data plane")
+				return false, err
+			} else {
+				updated = true
+			}
+		}
+	} else {
+		if fc.Spec.BPFEnabled == nil || *fc.Spec.BPFEnabled {
+			err := setBPFEnabledOnFelixConfiguration(fc, bpfEnabledOnInstall)
+			if err != nil {
+				reqLogger.Error(err, "Unable to enable eBPF data plane")
+				return false, err
+			} else {
+				updated = true
+			}
+		}
+	}
+
+	return updated, nil
 }
 
 var osExitOverride = os.Exit
@@ -1921,7 +2006,7 @@ func cidrWithinCidr(cidr, pool string) bool {
 	return false
 }
 
-func addCRDWatches(c controller.Controller, v operator.ProductVariant) error {
+func addCRDWatches(c ctrlruntime.Controller, v operator.ProductVariant) error {
 	pred := predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
 			// Create occurs because we've created it, so we can safely ignore it.
@@ -1929,7 +2014,7 @@ func addCRDWatches(c controller.Controller, v operator.ProductVariant) error {
 		},
 	}
 	for _, x := range crds.GetCRDs(v) {
-		if err := c.Watch(&source.Kind{Type: x}, &handler.EnqueueRequestForObject{}, pred); err != nil {
+		if err := c.WatchObject(x, &handler.EnqueueRequestForObject{}, pred); err != nil {
 			return err
 		}
 	}
