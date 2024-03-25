@@ -1162,9 +1162,9 @@ spec:
                                     is a calico-kube-controllers Deployment container.
                                   properties:
                                     name:
-                                      description: Name is an enum which identifies
+                                      description: 'Name is an enum which identifies
                                         the calico-kube-controllers Deployment container
-                                        by name.
+                                        by name. Supported values are: calico-kube-controllers'
                                       enum:
                                       - calico-kube-controllers
                                       type: string
@@ -1345,6 +1345,13 @@ spec:
                       specified. If omitted, a single pool will be configured if needed.
                     items:
                       properties:
+                        allowedUses:
+                          description: AllowedUse controls what the IP pool will be
+                            used for.  If not specified or empty, defaults to ["Tunnel",
+                            "Workload"] for back-compatibility
+                          items:
+                            type: string
+                          type: array
                         blockSize:
                           description: 'BlockSize specifies the CIDR prefex length
                             to use when allocating per-node IP blocks from the main
@@ -1371,6 +1378,10 @@ spec:
                           - VXLANCrossSubnet
                           - None
                           type: string
+                        name:
+                          description: Name is the name of the IP pool. If omitted,
+                            this will be generated.
+                          type: string
                         natOutgoing:
                           description: 'NATOutgoing specifies if NAT will be enabled
                             or disabled for outgoing traffic. Default: Enabled'
@@ -1385,6 +1396,7 @@ spec:
                       required:
                       - cidr
                       type: object
+                    maxItems: 25
                     type: array
                   linuxDataplane:
                     description: 'LinuxDataplane is used to select the dataplane used
@@ -2643,8 +2655,9 @@ spec:
                                     DaemonSet container.
                                   properties:
                                     name:
-                                      description: Name is an enum which identifies
+                                      description: 'Name is an enum which identifies
                                         the calico-node DaemonSet container by name.
+                                        Supported values are: calico-node'
                                       enum:
                                       - calico-node
                                       type: string
@@ -2727,9 +2740,11 @@ spec:
                                     a calico-node DaemonSet init container.
                                   properties:
                                     name:
-                                      description: Name is an enum which identifies
+                                      description: 'Name is an enum which identifies
                                         the calico-node DaemonSet init container by
-                                        name.
+                                        name. Supported values are: install-cni, hostpath-init,
+                                        flexvol-driver, mount-bpffs, node-certs-key-cert-provisioner,
+                                        calico-node-prometheus-server-tls-key-cert-provisioner'
                                       enum:
                                       - install-cni
                                       - hostpath-init
@@ -3998,9 +4013,9 @@ spec:
                                     is a calico-node-windows DaemonSet container.
                                   properties:
                                     name:
-                                      description: Name is an enum which identifies
+                                      description: 'Name is an enum which identifies
                                         the calico-node-windows DaemonSet container
-                                        by name.
+                                        by name. Supported values are: calico-node-windows'
                                       enum:
                                       - calico-node-windows
                                       type: string
@@ -4083,9 +4098,11 @@ spec:
                                     is a calico-node-windows DaemonSet init container.
                                   properties:
                                     name:
-                                      description: Name is an enum which identifies
+                                      description: 'Name is an enum which identifies
                                         the calico-node-windows DaemonSet init container
-                                        by name.
+                                        by name. Supported values are: install-cni;hostpath-init,
+                                        flexvol-driver, mount-bpffs, node-certs-key-cert-provisioner,
+                                        calico-node-windows-prometheus-server-tls-key-cert-provisioner'
                                       enum:
                                       - install-cni
                                       - hostpath-init
@@ -6845,10 +6862,12 @@ spec:
                                     a csi-node-driver DaemonSet container.
                                   properties:
                                     name:
-                                      description: Name is an enum which identifies
+                                      description: 'Name is an enum which identifies
                                         the csi-node-driver DaemonSet container by
-                                        name.
+                                        name. Supported values are: calico-csi, csi-node-driver-registrar.'
                                       enum:
+                                      - calico-csi
+                                      - csi-node-driver-registrar
                                       - csi-node-driver
                                       type: string
                                     resources:
@@ -8565,8 +8584,9 @@ spec:
                                     Deployment container.
                                   properties:
                                     name:
-                                      description: Name is an enum which identifies
-                                        the typha Deployment container by name.
+                                      description: 'Name is an enum which identifies
+                                        the typha Deployment container by name. Supported
+                                        values are: calico-typha'
                                       enum:
                                       - calico-typha
                                       type: string
@@ -8649,8 +8669,9 @@ spec:
                                     Deployment init container.
                                   properties:
                                     name:
-                                      description: Name is an enum which identifies
+                                      description: 'Name is an enum which identifies
                                         the typha Deployment init container by name.
+                                        Supported values are: typha-certs-key-cert-provisioner'
                                       enum:
                                       - typha-certs-key-cert-provisioner
                                       type: string
@@ -10295,9 +10316,10 @@ spec:
                                         is a calico-kube-controllers Deployment container.
                                       properties:
                                         name:
-                                          description: Name is an enum which identifies
+                                          description: 'Name is an enum which identifies
                                             the calico-kube-controllers Deployment
-                                            container by name.
+                                            container by name. Supported values are:
+                                            calico-kube-controllers'
                                           enum:
                                           - calico-kube-controllers
                                           type: string
@@ -10485,6 +10507,13 @@ spec:
                           if needed.
                         items:
                           properties:
+                            allowedUses:
+                              description: AllowedUse controls what the IP pool will
+                                be used for.  If not specified or empty, defaults
+                                to ["Tunnel", "Workload"] for back-compatibility
+                              items:
+                                type: string
+                              type: array
                             blockSize:
                               description: 'BlockSize specifies the CIDR prefex length
                                 to use when allocating per-node IP blocks from the
@@ -10512,6 +10541,10 @@ spec:
                               - VXLANCrossSubnet
                               - None
                               type: string
+                            name:
+                              description: Name is the name of the IP pool. If omitted,
+                                this will be generated.
+                              type: string
                             natOutgoing:
                               description: 'NATOutgoing specifies if NAT will be enabled
                                 or disabled for outgoing traffic. Default: Enabled'
@@ -10526,6 +10559,7 @@ spec:
                           required:
                           - cidr
                           type: object
+                        maxItems: 25
                         type: array
                       linuxDataplane:
                         description: 'LinuxDataplane is used to select the dataplane
@@ -11883,9 +11917,9 @@ spec:
                                         a calico-node DaemonSet container.
                                       properties:
                                         name:
-                                          description: Name is an enum which identifies
+                                          description: 'Name is an enum which identifies
                                             the calico-node DaemonSet container by
-                                            name.
+                                            name. Supported values are: calico-node'
                                           enum:
                                           - calico-node
                                           type: string
@@ -11970,9 +12004,11 @@ spec:
                                         is a calico-node DaemonSet init container.
                                       properties:
                                         name:
-                                          description: Name is an enum which identifies
+                                          description: 'Name is an enum which identifies
                                             the calico-node DaemonSet init container
-                                            by name.
+                                            by name. Supported values are: install-cni,
+                                            hostpath-init, flexvol-driver, mount-bpffs,
+                                            node-certs-key-cert-provisioner, calico-node-prometheus-server-tls-key-cert-provisioner'
                                           enum:
                                           - install-cni
                                           - hostpath-init
@@ -13339,9 +13375,9 @@ spec:
                                         is a calico-node-windows DaemonSet container.
                                       properties:
                                         name:
-                                          description: Name is an enum which identifies
+                                          description: 'Name is an enum which identifies
                                             the calico-node-windows DaemonSet container
-                                            by name.
+                                            by name. Supported values are: calico-node-windows'
                                           enum:
                                           - calico-node-windows
                                           type: string
@@ -13427,9 +13463,12 @@ spec:
                                         is a calico-node-windows DaemonSet init container.
                                       properties:
                                         name:
-                                          description: Name is an enum which identifies
+                                          description: 'Name is an enum which identifies
                                             the calico-node-windows DaemonSet init
-                                            container by name.
+                                            container by name. Supported values are:
+                                            install-cni;hostpath-init, flexvol-driver,
+                                            mount-bpffs, node-certs-key-cert-provisioner,
+                                            calico-node-windows-prometheus-server-tls-key-cert-provisioner'
                                           enum:
                                           - install-cni
                                           - hostpath-init
@@ -16391,10 +16430,13 @@ spec:
                                         is a csi-node-driver DaemonSet container.
                                       properties:
                                         name:
-                                          description: Name is an enum which identifies
+                                          description: 'Name is an enum which identifies
                                             the csi-node-driver DaemonSet container
-                                            by name.
+                                            by name. Supported values are: calico-csi,
+                                            csi-node-driver-registrar.'
                                           enum:
+                                          - calico-csi
+                                          - csi-node-driver-registrar
                                           - csi-node-driver
                                           type: string
                                         resources:
@@ -18227,8 +18269,9 @@ spec:
                                         Deployment container.
                                       properties:
                                         name:
-                                          description: Name is an enum which identifies
+                                          description: 'Name is an enum which identifies
                                             the typha Deployment container by name.
+                                            Supported values are: calico-typha'
                                           enum:
                                           - calico-typha
                                           type: string
@@ -18313,9 +18356,9 @@ spec:
                                         a typha Deployment init container.
                                       properties:
                                         name:
-                                          description: Name is an enum which identifies
+                                          description: 'Name is an enum which identifies
                                             the typha Deployment init container by
-                                            name.
+                                            name. Supported values are: typha-certs-key-cert-provisioner'
                                           enum:
                                           - typha-certs-key-cert-provisioner
                                           type: string
