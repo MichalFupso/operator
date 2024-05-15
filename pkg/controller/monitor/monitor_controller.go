@@ -110,6 +110,7 @@ func newReconciler(mgr manager.Manager, opts options.AddOptions, prometheusReady
 		tierWatchReady:  tierWatchReady,
 		clusterDomain:   opts.ClusterDomain,
 		usePSP:          opts.UsePSP,
+		multiTenant:     opts.MultiTenant,
 	}
 
 	r.status.AddStatefulSets([]types.NamespacedName{
@@ -188,6 +189,7 @@ type ReconcileMonitor struct {
 	tierWatchReady  *utils.ReadyFlag
 	clusterDomain   string
 	usePSP          bool
+	multiTenant     bool
 }
 
 func (r *ReconcileMonitor) getMonitor(ctx context.Context) (*operatorv1.Monitor, error) {
@@ -266,15 +268,6 @@ func (r *ReconcileMonitor) Reconcile(ctx context.Context, request reconcile.Requ
 		err = fmt.Errorf("waiting for Prometheus resources")
 		r.status.SetDegraded(operatorv1.ResourceNotReady, "Waiting for Prometheus resources to be ready", err, reqLogger)
 		return reconcile.Result{}, err
-	}
-
-	if err != nil {
-		if errors.IsNotFound(err) {
-			log.Info("No ConfigMap found, a default one will be created.")
-		} else {
-			r.status.SetDegraded(operatorv1.ResourceReadError, "Internal error attempting to retrieve ConfigMap", err, reqLogger)
-			return reconcile.Result{}, err
-		}
 	}
 
 	certificateManager, err := certificatemanager.Create(r.client, install, r.clusterDomain, common.OperatorNamespace())

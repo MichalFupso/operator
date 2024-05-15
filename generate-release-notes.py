@@ -1,11 +1,9 @@
-#!/usr/bin/env python
-import github
+#!/usr/bin/env python3
 from github import Github  # https://github.com/PyGithub/PyGithub
 import yaml
 import os
 import re
 import io
-import string
 import datetime
 
 # First create a Github instance. Create a token through Github website - provide "repo" auth.
@@ -31,7 +29,7 @@ def issues_in_milestone():
             # Found the milestone in this repo - look for issues (but only
             # ones that have been closed!)
             issues = []
-            for i in repo.get_issues(milestone=m, state="closed"):
+            for i in repo.get_issues(milestone=m, state="closed", labels=['release-note-required']):
                 pr = i.as_pull_request()
                 if pr.merged:
                     # Filter out PRs which are closed but not merged.

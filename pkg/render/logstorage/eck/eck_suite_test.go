@@ -1,4 +1,4 @@
-// Copyright (c) 2021-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2024 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,16 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package components
+package eck
 
-var ({{ with index .Components "key-cert-provisioner" }}
-	ComponentCSRInitContainer = component{
-		Version:  "{{ .Version }}",
-		Image:    "{{ .Image }}",
-		Registry: "{{ .Registry }}",
-	}
-{{- end }}
-	CommonImages = []component{
-		ComponentCSRInitContainer,
-	}
+import (
+	"testing"
+
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
+
+	"github.com/onsi/ginkgo/reporters"
 )
+
+func TestRender(t *testing.T) {
+	RegisterFailHandler(Fail)
+	junitReporter := reporters.NewJUnitReporter("../../../../report/ut/eck_suite.xml")
+	RunSpecsWithDefaultAndCustomReporters(t, "pkg/logstorage/eck Suite", []Reporter{junitReporter})
+}

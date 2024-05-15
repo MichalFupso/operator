@@ -54,6 +54,7 @@ import (
 	"github.com/tigera/operator/pkg/controller/k8sapi"
 	"github.com/tigera/operator/pkg/ctrlruntime"
 	"github.com/tigera/operator/pkg/render"
+	"github.com/tigera/operator/pkg/render/logstorage/eck"
 )
 
 const (
@@ -438,18 +439,6 @@ func GetManagementClusterConnection(ctx context.Context, c client.Client) (*oper
 	return managementClusterConnection, nil
 }
 
-// GetAmazonCloudIntegration returns the tigera AmazonCloudIntegration instance.
-func GetAmazonCloudIntegration(ctx context.Context, client client.Client) (*operatorv1.AmazonCloudIntegration, error) {
-	// Fetch the Installation instance. We only support a single instance named "tsee-secure".
-	instance := &operatorv1.AmazonCloudIntegration{}
-	err := client.Get(ctx, DefaultTSEEInstanceKey, instance)
-	if err != nil {
-		return nil, err
-	}
-
-	return instance, nil
-}
-
 // GetAuthentication finds the authentication CR in your cluster.
 func GetAuthentication(ctx context.Context, cli client.Client) (*operatorv1.Authentication, error) {
 	authentication := &operatorv1.Authentication{}
@@ -560,10 +549,21 @@ func GetAPIServer(ctx context.Context, client client.Client) (*operatorv1.APISer
 	return instance, "", nil
 }
 
+// GetPacketCapture finds the PacketCapture CR in your cluster.
+func GetPacketCaptureAPI(ctx context.Context, cli client.Client) (*operatorv1.PacketCaptureAPI, error) {
+	pc := &operatorv1.PacketCaptureAPI{}
+	err := cli.Get(ctx, DefaultTSEEInstanceKey, pc)
+	if err != nil {
+		return nil, err
+	}
+
+	return pc, nil
+}
+
 // GetElasticLicenseType returns the license type from elastic-licensing ConfigMap that ECK operator keeps updated.
 func GetElasticLicenseType(ctx context.Context, cli client.Client, logger logr.Logger) (render.ElasticsearchLicenseType, error) {
 	cm := &corev1.ConfigMap{}
-	err := cli.Get(ctx, client.ObjectKey{Name: render.ECKLicenseConfigMapName, Namespace: render.ECKOperatorNamespace}, cm)
+	err := cli.Get(ctx, client.ObjectKey{Name: eck.LicenseConfigMapName, Namespace: eck.OperatorNamespace}, cm)
 	if err != nil {
 		return render.ElasticsearchLicenseTypeUnknown, err
 	}

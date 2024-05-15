@@ -98,7 +98,6 @@ type NodeConfiguration struct {
 	ClusterDomain string
 
 	// Optional fields.
-	AmazonCloudIntegration  *operatorv1.AmazonCloudIntegration
 	LogCollector            *operatorv1.LogCollector
 	MigrateNamespaces       bool
 	NodeAppArmorProfile     string
@@ -165,9 +164,9 @@ func (c *nodeComponent) ResolveImages(is *operatorv1.ImageSet) error {
 			c.cniImage = appendIfErr(components.GetReference(components.ComponentTigeraCNI, reg, path, prefix, is))
 		}
 		c.nodeImage = appendIfErr(components.GetReference(components.ComponentTigeraNode, reg, path, prefix, is))
-		c.flexvolImage = appendIfErr(components.GetReference(components.ComponentFlexVolumePrivate, reg, path, prefix, is))
+		c.flexvolImage = appendIfErr(components.GetReference(components.ComponentTigeraFlexVolume, reg, path, prefix, is))
 	} else {
-		c.flexvolImage = appendIfErr(components.GetReference(components.ComponentFlexVolume, reg, path, prefix, is))
+		c.flexvolImage = appendIfErr(components.GetReference(components.ComponentCalicoFlexVolume, reg, path, prefix, is))
 		if operatorv1.IsFIPSModeEnabled(c.cfg.Installation.FIPSMode) {
 			c.cniImage = appendIfErr(components.GetReference(components.ComponentCalicoCNIFIPS, reg, path, prefix, is))
 			c.nodeImage = appendIfErr(components.GetReference(components.ComponentCalicoNodeFIPS, reg, path, prefix, is))
@@ -1057,7 +1056,7 @@ func (c *nodeComponent) nodeVolumes() []corev1.Volume {
 	} else {
 		volumes = append(volumes,
 			c.varRunCalicoVolume(),
-			corev1.Volume{Name: "var-lib-calico", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/calico"}}},
+			corev1.Volume{Name: "var-lib-calico", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/calico", Type: &dirOrCreate}}},
 		)
 	}
 
@@ -1083,7 +1082,7 @@ func (c *nodeComponent) nodeVolumes() []corev1.Volume {
 	if c.cfg.Installation.CNI.Type == operatorv1.PluginCalico {
 		// Determine directories to use for CNI artifacts based on the provider.
 		cniNetDir, cniBinDir, cniLogDir := c.cniDirectories()
-		volumes = append(volumes, corev1.Volume{Name: "cni-bin-dir", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: cniBinDir}}})
+		volumes = append(volumes, corev1.Volume{Name: "cni-bin-dir", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: cniBinDir, Type: &dirOrCreate}}})
 		volumes = append(volumes, corev1.Volume{Name: "cni-net-dir", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: cniNetDir}}})
 		volumes = append(volumes, corev1.Volume{Name: "cni-log-dir", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: cniLogDir}}})
 	}
@@ -1142,7 +1141,13 @@ func (c *nodeComponent) nodeVolumes() []corev1.Volume {
 }
 
 func (c *nodeComponent) varRunCalicoVolume() corev1.Volume {
-	return corev1.Volume{Name: "var-run-calico", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/run/calico"}}}
+	dirOrCreate := corev1.HostPathDirectoryOrCreate
+	return corev1.Volume{
+		Name: "var-run-calico",
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: "/var/run/calico", Type: &dirOrCreate},
+		},
+	}
 }
 
 func (c *nodeComponent) vppDataplaneEnabled() bool {
@@ -1642,18 +1647,6 @@ func (c *nodeComponent) nodeEnvVars() []corev1.EnvVar {
 
 	if c.cfg.Installation.CNI.Type != operatorv1.PluginCalico {
 		nodeEnv = append(nodeEnv, corev1.EnvVar{Name: "FELIX_ROUTESOURCE", Value: "WorkloadIPs"})
-	}
-
-	if c.cfg.AmazonCloudIntegration != nil {
-		nodeEnv = append(nodeEnv, GetTigeraSecurityGroupEnvVariables(c.cfg.AmazonCloudIntegration)...)
-		nodeEnv = append(nodeEnv, corev1.EnvVar{
-			Name:  "FELIX_FAILSAFEINBOUNDHOSTPORTS",
-			Value: "tcp:22,udp:68,tcp:179,tcp:443,tcp:5473,tcp:6443",
-		})
-		nodeEnv = append(nodeEnv, corev1.EnvVar{
-			Name:  "FELIX_FAILSAFEOUTBOUNDHOSTPORTS",
-			Value: "udp:53,udp:67,tcp:179,tcp:443,tcp:5473,tcp:6443",
-		})
 	}
 
 	nodeEnv = append(nodeEnv, c.cfg.K8sServiceEp.EnvVars(true, c.cfg.Installation.KubernetesProvider)...)

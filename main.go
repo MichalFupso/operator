@@ -29,7 +29,6 @@ import (
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
 	operatorv1 "github.com/tigera/operator/api/v1"
 	v1 "github.com/tigera/operator/api/v1"
-	operatorv1beta1 "github.com/tigera/operator/api/v1beta1"
 	"github.com/tigera/operator/controllers"
 	"github.com/tigera/operator/pkg/active"
 	"github.com/tigera/operator/pkg/apis"
@@ -44,6 +43,7 @@ import (
 	"github.com/tigera/operator/pkg/render/common/networkpolicy"
 	"github.com/tigera/operator/pkg/render/intrusiondetection/dpi"
 	"github.com/tigera/operator/pkg/render/logstorage"
+	"github.com/tigera/operator/pkg/render/logstorage/eck"
 	"github.com/tigera/operator/version"
 
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
@@ -81,7 +81,6 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(apiextensions.AddToScheme(scheme))
 	utilruntime.Must(operatorv1.AddToScheme(scheme))
-	utilruntime.Must(operatorv1beta1.AddToScheme(scheme))
 	utilruntime.Must(apis.AddToScheme(scheme))
 }
 
@@ -143,7 +142,6 @@ func main() {
 		if strings.ToLower(printImages) == "list" {
 			cmpnts := components.CalicoImages
 			cmpnts = append(cmpnts, components.EnterpriseImages...)
-			cmpnts = append(cmpnts, components.CommonImages...)
 
 			for _, x := range cmpnts {
 				ref, _ := components.GetReference(x, "", "", "", nil)
@@ -388,12 +386,6 @@ func main() {
 	}
 	setupLog.WithValues("required", enterpriseCRDExists).Info("Checking if TSEE controllers are required")
 
-	amazonCRDExists, err := utils.RequiresAmazonController(mgr.GetConfig())
-	if err != nil {
-		setupLog.Error(err, "Failed to determine if AmazonCloudIntegration is required")
-		os.Exit(1)
-	}
-
 	clusterDomain, err := dns.GetClusterDomain(dns.DefaultResolveConfPath)
 	if err != nil {
 		clusterDomain = dns.DefaultClusterDomain
@@ -415,7 +407,7 @@ func main() {
 		render.ComplianceNamespace,
 		render.IntrusionDetectionNamespace,
 		dpi.DeepPacketInspectionNamespace,
-		render.ECKOperatorNamespace,
+		eck.OperatorNamespace,
 		render.LogCollectorNamespace,
 		render.CSIDaemonSetNamespace,
 		render.ManagerNamespace,
@@ -447,7 +439,6 @@ func main() {
 		DetectedProvider:    provider,
 		EnterpriseCRDExists: enterpriseCRDExists,
 		UsePSP:              usePSP,
-		AmazonCRDExists:     amazonCRDExists,
 		ClusterDomain:       clusterDomain,
 		KubernetesVersion:   kubernetesVersion,
 		ManageCRDs:          manageCRDs,

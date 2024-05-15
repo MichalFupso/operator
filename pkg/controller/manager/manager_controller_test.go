@@ -21,7 +21,6 @@ import (
 	"encoding/pem"
 	"fmt"
 
-	relasticsearch "github.com/tigera/operator/pkg/render/common/elasticsearch"
 	kerror "k8s.io/apimachinery/pkg/api/errors"
 
 	. "github.com/onsi/ginkgo"
@@ -51,8 +50,10 @@ import (
 	ctrlrfake "github.com/tigera/operator/pkg/ctrlruntime/client/fake"
 	"github.com/tigera/operator/pkg/dns"
 	"github.com/tigera/operator/pkg/render"
+	relasticsearch "github.com/tigera/operator/pkg/render/common/elasticsearch"
 	"github.com/tigera/operator/pkg/render/common/secret"
 	rsecret "github.com/tigera/operator/pkg/render/common/secret"
+	"github.com/tigera/operator/pkg/render/logstorage/eck"
 	"github.com/tigera/operator/pkg/render/monitor"
 	tigeratls "github.com/tigera/operator/pkg/tls"
 	"github.com/tigera/operator/test"
@@ -231,16 +232,10 @@ var _ = Describe("Manager controller tests", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(c.Create(ctx, internalKp.Secret(common.OperatorNamespace()))).NotTo(HaveOccurred())
 
-			Expect(c.Create(ctx, &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      render.ElasticsearchManagerUserSecret,
-					Namespace: "tigera-operator",
-				},
-			})).NotTo(HaveOccurred())
 			Expect(c.Create(ctx, &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      render.ECKLicenseConfigMapName,
-					Namespace: render.ECKOperatorNamespace,
+					Name:      eck.LicenseConfigMapName,
+					Namespace: eck.OperatorNamespace,
 				},
 				Data: map[string]string{"eck_license_level": string(render.ElasticsearchLicenseTypeEnterpriseTrial)},
 			})).NotTo(HaveOccurred())
@@ -537,17 +532,10 @@ var _ = Describe("Manager controller tests", func() {
 
 			Expect(c.Create(ctx, relasticsearch.NewClusterConfig("cluster", 1, 1, 1).ConfigMap())).NotTo(HaveOccurred())
 
-			Expect(c.Create(ctx, &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      render.ElasticsearchManagerUserSecret,
-					Namespace: "tigera-operator",
-				},
-			})).NotTo(HaveOccurred())
-
 			Expect(c.Create(ctx, &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      render.ECKLicenseConfigMapName,
-					Namespace: render.ECKOperatorNamespace,
+					Name:      eck.LicenseConfigMapName,
+					Namespace: eck.OperatorNamespace,
 				},
 				Data: map[string]string{"eck_license_level": string(render.ElasticsearchLicenseTypeEnterpriseTrial)},
 			})).NotTo(HaveOccurred())
@@ -663,12 +651,12 @@ var _ = Describe("Manager controller tests", func() {
 			})
 
 			It("should wait if allow-tigera tier is unavailable", func() {
-				utils.DeleteAllowTigeraTierAndExpectWait(ctx, c, &r, mockStatus)
+				test.DeleteAllowTigeraTierAndExpectWait(ctx, c, &r, mockStatus)
 			})
 
 			It("should wait if tier watch is not ready", func() {
 				r.tierWatchReady = &utils.ReadyFlag{}
-				utils.ExpectWaitForTierWatch(ctx, &r, mockStatus)
+				test.ExpectWaitForTierWatch(ctx, &r, mockStatus)
 			})
 		})
 

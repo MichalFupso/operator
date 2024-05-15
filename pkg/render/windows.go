@@ -56,7 +56,6 @@ type WindowsConfiguration struct {
 	TLS                     *TyphaNodeTLS
 	PrometheusServerTLS     certificatemanagement.KeyPairInterface
 	NodeReporterMetricsPort int
-	AmazonCloudIntegration  *operatorv1.AmazonCloudIntegration
 	VXLANVNI                int
 }
 
@@ -380,14 +379,14 @@ func (c *windowsComponent) windowsVolumes() []corev1.Volume {
 		{Name: "policysync", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/run/nodeagent", Type: &dirOrCreate}}},
 		c.cfg.TLS.TrustedBundle.Volume(),
 		c.cfg.TLS.NodeSecret.Volume(),
-		corev1.Volume{Name: "var-run-calico", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/run/calico"}}},
-		corev1.Volume{Name: "var-lib-calico", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/calico"}}},
+		corev1.Volume{Name: "var-run-calico", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/run/calico", Type: &dirOrCreate}}},
+		corev1.Volume{Name: "var-lib-calico", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/calico", Type: &dirOrCreate}}},
 	}
 
 	// If needed for this configuration, then include the CNI volumes.
 	if c.cfg.Installation.CNI.Type == operatorv1.PluginCalico {
 		// Determine directories to use for CNI artifacts based on the provider.
-		volumes = append(volumes, corev1.Volume{Name: "cni-bin-dir", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: c.cfg.Installation.WindowsNodes.CNIBinDir}}})
+		volumes = append(volumes, corev1.Volume{Name: "cni-bin-dir", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: c.cfg.Installation.WindowsNodes.CNIBinDir, Type: &dirOrCreate}}})
 		volumes = append(volumes, corev1.Volume{Name: "cni-net-dir", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: c.cfg.Installation.WindowsNodes.CNIConfigDir}}})
 		volumes = append(volumes, corev1.Volume{Name: "cni-log-dir", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: c.cfg.Installation.WindowsNodes.CNILogDir, Type: &dirOrCreate}}})
 	}
@@ -709,18 +708,6 @@ func (c *windowsComponent) windowsEnvVars() []corev1.EnvVar {
 
 	if c.cfg.Installation.CNI.Type != operatorv1.PluginCalico {
 		windowsEnv = append(windowsEnv, corev1.EnvVar{Name: "FELIX_ROUTESOURCE", Value: "WorkloadIPs"})
-	}
-
-	if c.cfg.AmazonCloudIntegration != nil {
-		windowsEnv = append(windowsEnv, GetTigeraSecurityGroupEnvVariables(c.cfg.AmazonCloudIntegration)...)
-		windowsEnv = append(windowsEnv, corev1.EnvVar{
-			Name:  "FELIX_FAILSAFEINBOUNDHOSTPORTS",
-			Value: "tcp:22,udp:68,tcp:179,tcp:443,tcp:5473,tcp:6443",
-		})
-		windowsEnv = append(windowsEnv, corev1.EnvVar{
-			Name:  "FELIX_FAILSAFEOUTBOUNDHOSTPORTS",
-			Value: "udp:53,udp:67,tcp:179,tcp:443,tcp:5473,tcp:6443",
-		})
 	}
 
 	windowsEnv = append(windowsEnv, c.cfg.K8sServiceEp.EnvVars(true, c.cfg.Installation.KubernetesProvider)...)

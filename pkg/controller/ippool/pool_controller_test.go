@@ -508,7 +508,7 @@ var _ = table.DescribeTable("Test OpenShift IP pool defaulting",
 		&operator.CalicoNetworkSpec{
 			IPPools: []operator.IPPool{
 				{
-					Name:          "10.0.0.0-24",
+					Name:          "default-ipv4-ippool",
 					CIDR:          "10.0.0.0/24",
 					Encapsulation: "VXLAN",
 					NATOutgoing:   "Disabled",
@@ -598,6 +598,28 @@ var _ = Describe("fillDefaults()", func() {
 		// Create a client that will have a crud interface of k8s objects.
 		cli = fake.NewClientBuilder().WithScheme(scheme).Build()
 		ctx = context.Background()
+	})
+
+	It("should reject an IP pool with no Encapsulation", func() {
+		instance := &operator.Installation{
+			Spec: operator.InstallationSpec{
+				CalicoNetwork: &operator.CalicoNetworkSpec{
+					IPPools: []operator.IPPool{
+						{CIDR: "192.168.0.0/16"},
+					},
+				},
+			},
+		}
+
+		// Fill defaults to make sure we pass other validation. Then remove the Encapsulation.
+		// Fill in prerequisite defaults.
+		fillPrerequisiteDefaults(instance)
+		Expect(fillDefaults(ctx, cli, instance, currentPools)).ToNot(HaveOccurred())
+		instance.Spec.CalicoNetwork.IPPools[0].Encapsulation = ""
+
+		err := ValidatePools(instance)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("is invalid for ipPool.encapsulation, should be one of"))
 	})
 
 	// This table verifies that kubernetes provider configuration is accounted for in defaulting. Specifically, it

@@ -61,6 +61,13 @@ var (
 		Registry: "{{ .Registry }}",
 	}
 {{- end }}
+{{ with index .Components "key-cert-provisioner" }}
+	ComponentTigeraCSRInitContainer = component{
+		Version:  "{{ .Version }}",
+		Image:    "{{ .Image }}",
+		Registry: "{{ .Registry }}",
+	}
+{{- end }}
 {{ with index .Components "deep-packet-inspection" }}
 	ComponentDeepPacketInspection = component{
 		Version:  "{{ .Version }}",
@@ -329,13 +336,6 @@ var (
 		Registry: "{{ .Registry }}",
 	}
 {{- end }}
-{{ with index .Components "cloud-controllers" }}
-	ComponentCloudControllers = component{
-		Version:  "{{ .Version }}",
-		Image:    "{{ .Image }}",
-		Registry: "{{ .Registry }}",
-	}
-{{- end }}
 {{ with index .Components "elasticsearch-metrics" }}
 	ComponentElasticsearchMetrics = component{
 		Version:  "{{ .Version }}",
@@ -344,21 +344,21 @@ var (
 	}
 {{- end }}
 {{ with index .Components "flexvol" }}
-	ComponentFlexVolumePrivate = component{
+	ComponentTigeraFlexVolume = component{
 		Version:  "{{ .Version }}",
 		Image:    "{{ .Image }}",
 		Registry: "{{ .Registry }}",
 	}
 {{- end }}
 {{ with index .Components "csi" }}
-	ComponentCSIPrivate = component{
+	ComponentTigeraCSI = component{
 		Version:  "{{ .Version }}",
 		Image:    "{{ .Image }}",
 		Registry: "{{ .Registry }}",
 	}
 {{- end }}
 {{ with index .Components "csi-node-driver-registrar" }}
-	ComponentCSINodeDriverRegistrarPrivate = component{
+	ComponentTigeraCSINodeDriverRegistrar = component{
 		Version:  "{{ .Version }}",
 		Image:    "{{ .Image }}",
 		Registry: "{{ .Registry }}",
@@ -373,6 +373,7 @@ var (
 		ComponentComplianceReporter,
 		ComponentComplianceServer,
 		ComponentComplianceSnapshotter,
+		ComponentTigeraCSRInitContainer,
 		ComponentDeepPacketInspection,
 		ComponentElasticTseeInstaller,
 		ComponentElasticsearch,
@@ -404,13 +405,12 @@ var (
 		ComponentTigeraCNI,
 		ComponentTigeraCNIFIPS,
 		ComponentTigeraCNIWindows,
-		ComponentCloudControllers,
 		ComponentElasticsearchMetrics,
 		ComponentESGateway,
 		ComponentLinseed,
 		ComponentDikastes,
-		ComponentFlexVolumePrivate,
-		ComponentCSIPrivate,
-		ComponentCSINodeDriverRegistrarPrivate,
+		ComponentTigeraFlexVolume,
+		ComponentTigeraCSI,
+		ComponentTigeraCSINodeDriverRegistrar,
 	}
 )

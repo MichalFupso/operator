@@ -81,7 +81,6 @@ func Add(mgr manager.Manager, opts options.AddOptions) error {
 
 		go utils.WaitToAddNetworkPolicyWatches(c, k8sClient, log, []types.NamespacedName{
 			{Name: render.APIServerPolicyName, Namespace: rmeta.APIServerNamespace(operatorv1.TigeraSecureEnterprise)},
-			{Name: render.PacketCapturePolicyName, Namespace: render.PacketCaptureNamespace},
 		})
 	}
 
@@ -94,7 +93,6 @@ func newReconciler(mgr manager.Manager, opts options.AddOptions) *ReconcileAPISe
 		client:              mgr.GetClient(),
 		scheme:              mgr.GetScheme(),
 		provider:            opts.DetectedProvider,
-		amazonCRDExists:     opts.AmazonCRDExists,
 		enterpriseCRDsExist: opts.EnterpriseCRDExists,
 		status:              status.New(mgr.GetClient(), "apiserver", opts.KubernetesVersion),
 		clusterDomain:       opts.ClusterDomain,
@@ -124,14 +122,6 @@ func add(c ctrlruntime.Controller, r *ReconcileAPIServer) error {
 		return fmt.Errorf("apiserver-controller failed to watch ConfigMap %s: %w", render.K8sSvcEndpointConfigMapName, err)
 	}
 
-	if r.amazonCRDExists {
-		err = c.WatchObject(&operatorv1.AmazonCloudIntegration{}, &handler.EnqueueRequestForObject{})
-		if err != nil {
-			log.V(5).Info("Failed to create AmazonCloudIntegration watch", "err", err)
-			return fmt.Errorf("apiserver-controller failed to watch primary resource: %v", err)
-		}
-	}
-
 	if r.enterpriseCRDsExist {
 		// Watch for changes to primary resource ManagementCluster
 		err = c.WatchObject(&operatorv1.ManagementCluster{}, &handler.EnqueueRequestForObject{})
@@ -158,6 +148,7 @@ func add(c ctrlruntime.Controller, r *ReconcileAPIServer) error {
 		if err != nil {
 			return fmt.Errorf("apiserver-controller failed to watch resource: %w", err)
 		}
+
 	}
 
 	// Watch for the namespace(s) managed by this controller.
@@ -169,7 +160,7 @@ func add(c ctrlruntime.Controller, r *ReconcileAPIServer) error {
 	}
 
 	for _, secretName := range []string{
-		"calico-apiserver-certs", "tigera-apiserver-certs", render.PacketCaptureServerCert,
+		"calico-apiserver-certs", "tigera-apiserver-certs",
 		certificatemanagement.CASecretName, render.DexTLSSecretName, monitor.PrometheusClientTLSSecretName,
 	} {
 		if err = utils.AddSecretsWatch(c, secretName, common.OperatorNamespace()); err != nil {
@@ -184,6 +175,7 @@ func add(c ctrlruntime.Controller, r *ReconcileAPIServer) error {
 	if err = utils.AddTigeraStatusWatch(c, ResourceName); err != nil {
 		return fmt.Errorf("apiserver-controller failed to watch apiserver Tigerastatus: %w", err)
 	}
+
 	log.V(5).Info("Controller created and Watches setup")
 	return nil
 }
@@ -198,7 +190,6 @@ type ReconcileAPIServer struct {
 	client              client.Client
 	scheme              *runtime.Scheme
 	provider            operatorv1.Provider
-	amazonCRDExists     bool
 	enterpriseCRDsExist bool
 	status              status.StatusManager
 	clusterDomain       string
@@ -293,7 +284,6 @@ func (r *ReconcileAPIServer) Reconcile(ctx context.Context, request reconcile.Re
 	// Query enterprise-only data.
 	var tunnelCAKeyPair certificatemanagement.KeyPairInterface
 	var trustedBundle certificatemanagement.TrustedBundle
-	var amazon *operatorv1.AmazonCloudIntegration
 	var managementCluster *operatorv1.ManagementCluster
 	var managementClusterConnection *operatorv1.ManagementClusterConnection
 	includeV3NetworkPolicy := false
@@ -333,16 +323,6 @@ func (r *ReconcileAPIServer) Reconcile(ctx context.Context, request reconcile.Re
 			}
 			if tunnelCASecret != nil {
 				tunnelCAKeyPair = certificatemanagement.NewKeyPair(tunnelCASecret, nil, "")
-			}
-		}
-
-		if r.amazonCRDExists {
-			amazon, err = utils.GetAmazonCloudIntegration(ctx, r.client)
-			if errors.IsNotFound(err) {
-				amazon = nil
-			} else if err != nil {
-				r.status.SetDegraded(operatorv1.ResourceReadError, "Error reading AmazonCloudIntegration", err, reqLogger)
-				return reconcile.Result{}, err
 			}
 		}
 
@@ -397,7 +377,6 @@ func (r *ReconcileAPIServer) Reconcile(ctx context.Context, request reconcile.Re
 		ForceHostNetwork:            false,
 		ManagementCluster:           managementCluster,
 		ManagementClusterConnection: managementClusterConnection,
-		AmazonCloudIntegration:      amazon,
 		TLSKeyPair:                  tlsSecret,
 		PullSecrets:                 pullSecrets,
 		Openshift:                   r.provider == operatorv1.ProviderOpenShift,
@@ -424,77 +403,11 @@ func (r *ReconcileAPIServer) Reconcile(ctx context.Context, request reconcile.Re
 		}),
 	}
 
-	var pcPolicy render.Component
-	if variant == operatorv1.TigeraSecureEnterprise && (!r.multiTenant || managementCluster == nil) {
-		packetCaptureCertSecret, err := certificateManager.GetOrCreateKeyPair(
-			r.client,
-			render.PacketCaptureServerCert,
-			common.OperatorNamespace(),
-			dns.GetServiceDNSNames(render.PacketCaptureServiceName, render.PacketCaptureNamespace, r.clusterDomain))
-		if err != nil {
-			r.status.SetDegraded(operatorv1.ResourceReadError, "Error retrieve or creating packet capture TLS certificate", err, reqLogger)
-			return reconcile.Result{}, err
-		}
-
-		// Fetch the Authentication spec. If present, we use to configure user authentication.
-		authenticationCR, err := utils.GetAuthentication(ctx, r.client)
-		if err != nil && !errors.IsNotFound(err) {
-			r.status.SetDegraded(operatorv1.ResourceReadError, "Error querying Authentication", err, reqLogger)
-			return reconcile.Result{}, err
-		}
-
-		keyValidatorConfig, err := utils.GetKeyValidatorConfig(ctx, r.client, authenticationCR, r.clusterDomain)
-		if err != nil {
-			r.status.SetDegraded(operatorv1.ResourceUpdateError, "Failed to process the authentication CR.", err, reqLogger)
-			return reconcile.Result{}, err
-		}
-
-		var certificates []certificatemanagement.CertificateInterface
-		if keyValidatorConfig != nil {
-			dexSecret, err := certificateManager.GetCertificate(r.client, render.DexTLSSecretName, common.OperatorNamespace())
-			if err != nil {
-				r.status.SetDegraded(operatorv1.ResourceReadError, fmt.Sprintf("Failed to retrieve %s", render.DexTLSSecretName), err, reqLogger)
-				return reconcile.Result{}, err
-			} else if dexSecret != nil {
-				certificates = append(certificates, dexSecret)
-			}
-		}
-		trustedBundle := certificateManager.CreateTrustedBundle(certificates...)
-
-		packetCaptureApiCfg := &render.PacketCaptureApiConfiguration{
-			PullSecrets:                 pullSecrets,
-			Openshift:                   r.provider == operatorv1.ProviderOpenShift,
-			Installation:                installationSpec,
-			KeyValidatorConfig:          keyValidatorConfig,
-			ServerCertSecret:            packetCaptureCertSecret,
-			ClusterDomain:               r.clusterDomain,
-			ManagementClusterConnection: managementClusterConnection,
-			TrustedBundle:               trustedBundle,
-			UsePSP:                      r.usePSP,
-		}
-		pc := render.PacketCaptureAPI(packetCaptureApiCfg)
-		pcPolicy = render.PacketCaptureAPIPolicy(packetCaptureApiCfg)
-		components = append(components, pc,
-			rcertificatemanagement.CertificateManagement(&rcertificatemanagement.Config{
-				Namespace:       render.PacketCaptureNamespace,
-				ServiceAccounts: []string{render.PacketCaptureServiceAccountName},
-				KeyPairOptions: []rcertificatemanagement.KeyPairOption{
-					rcertificatemanagement.NewKeyPairOption(packetCaptureCertSecret, true, true),
-				},
-				TrustedBundle: trustedBundle,
-			}),
-		)
-		certificateManager.AddToStatusManager(r.status, render.PacketCaptureNamespace)
-	}
-
 	// v3 NetworkPolicy will fail to reconcile if the API server deployment is unhealthy. In case the API Server
 	// deployment becomes unhealthy and reconciliation of non-NetworkPolicy resources in the apiserver controller
 	// would resolve it, we render the network policies of components last to prevent a chicken-and-egg scenario.
 	if includeV3NetworkPolicy {
 		components = append(components, render.APIServerPolicy(&apiServerCfg))
-		if pcPolicy != nil {
-			components = append(components, pcPolicy)
-		}
 	}
 
 	if err = imageset.ApplyImageSet(ctx, r.client, variant, components...); err != nil {

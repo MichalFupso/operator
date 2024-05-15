@@ -47,6 +47,7 @@ import (
 	"github.com/tigera/operator/pkg/controller/utils"
 	ctrlrfake "github.com/tigera/operator/pkg/ctrlruntime/client/fake"
 	"github.com/tigera/operator/pkg/render"
+	"github.com/tigera/operator/pkg/render/logstorage/eck"
 	"github.com/tigera/operator/test"
 )
 
@@ -147,8 +148,8 @@ var _ = Describe("PolicyRecommendation controller tests", func() {
 
 		Expect(c.Create(ctx, &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      render.ECKLicenseConfigMapName,
-				Namespace: render.ECKOperatorNamespace,
+				Name:      eck.LicenseConfigMapName,
+				Namespace: eck.OperatorNamespace,
 			},
 			Data: map[string]string{"eck_license_level": string(render.ElasticsearchLicenseTypeEnterpriseTrial)},
 		})).NotTo(HaveOccurred())
@@ -241,12 +242,12 @@ var _ = Describe("PolicyRecommendation controller tests", func() {
 		})
 
 		It("should wait if allow-tigera tier is unavailable", func() {
-			utils.DeleteAllowTigeraTierAndExpectWait(ctx, c, &r, mockStatus)
+			test.DeleteAllowTigeraTierAndExpectWait(ctx, c, &r, mockStatus)
 		})
 
 		It("should wait if tier watch is not ready", func() {
 			r.tierWatchReady = &utils.ReadyFlag{}
-			utils.ExpectWaitForTierWatch(ctx, &r, mockStatus)
+			test.ExpectWaitForTierWatch(ctx, &r, mockStatus)
 		})
 	})
 

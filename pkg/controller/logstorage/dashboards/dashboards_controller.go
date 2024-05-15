@@ -17,9 +17,10 @@ package dashboards
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/url"
-
-	"github.com/tigera/operator/pkg/controller/logstorage/initializer"
+	"strconv"
+	"strings"
 
 	esv1 "github.com/elastic/cloud-on-k8s/v2/pkg/apis/elasticsearch/v1"
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
@@ -36,11 +37,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	operatorv1 "github.com/tigera/operator/api/v1"
+	"github.com/tigera/operator/pkg/controller/logstorage/initializer"
 	"github.com/tigera/operator/pkg/controller/options"
 	"github.com/tigera/operator/pkg/controller/status"
 	"github.com/tigera/operator/pkg/controller/utils"
 	"github.com/tigera/operator/pkg/render"
 	"github.com/tigera/operator/pkg/render/common/networkpolicy"
+	"github.com/tigera/operator/pkg/render/logstorage/kibana"
 	"github.com/tigera/operator/pkg/tls/certificatemanagement"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -139,7 +142,7 @@ func Add(mgr manager.Manager, opts options.AddOptions) error {
 	}
 
 	// Catch if something modifies the resources that this controller consumes.
-	if err := utils.AddServiceWatch(c, render.KibanaServiceName, helper.InstallNamespace()); err != nil {
+	if err := utils.AddServiceWatch(c, kibana.ServiceName, helper.InstallNamespace()); err != nil {
 		return fmt.Errorf("log-storage-dashboards-controller failed to watch the Service resource: %w", err)
 	}
 	if err := utils.AddConfigMapWatch(c, certificatemanagement.TrustedCertConfigMapName, helper.InstallNamespace(), &handler.EnqueueRequestForObject{}); err != nil {
@@ -259,7 +262,7 @@ func (d DashboardsSubController) Reconcile(ctx context.Context, request reconcil
 
 	// Determine where to access Kibana.
 	kibanaHost := "tigera-secure-kb-http.tigera-kibana.svc"
-	kibanaPort := "5601"
+	kibanaPort := uint16(5601)
 	kibanaScheme := "https"
 
 	var externalKibanaSecret *corev1.Secret
@@ -290,8 +293,13 @@ func (d DashboardsSubController) Reconcile(ctx context.Context, request reconcil
 			return reconcile.Result{}, nil
 		}
 		kibanaScheme = url.Scheme
-		kibanaHost = url.Hostname()
-		kibanaPort = url.Port()
+		kibanaHost = strings.TrimSuffix(url.Hostname(), "/")
+		kibanaPort, err = parsePort(url.Port())
+		if err != nil {
+			reqLogger.Error(err, "Failed to extract domain or unit16 port for Kibana")
+			d.status.SetDegraded(operatorv1.ResourceValidationError, "Failed to parse kibana domain or port", err, reqLogger)
+			return reconcile.Result{}, nil
+		}
 
 		if tenant.ElasticMTLS() {
 			// If mTLS is enabled, get the secret containing the CA and client certificate.
@@ -373,4 +381,15 @@ func (d DashboardsSubController) Reconcile(ctx context.Context, request reconcil
 	d.status.ClearDegraded()
 
 	return reconcile.Result{}, nil
+}
+
+func parsePort(port string) (uint16, error) {
+	kibanaPort, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return 0, err
+	}
+	if kibanaPort > math.MaxInt16 {
+		return 0, fmt.Errorf(fmt.Sprintf("Kibana port is larger them max %d", math.MaxInt16))
+	}
+	return uint16(kibanaPort), nil
 }

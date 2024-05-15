@@ -55,6 +55,11 @@ type Policy struct {
 				}
 			}
 		}
+		Warm struct {
+			Actions struct {
+				Readonly *struct{} `json:"readonly,omitempty"`
+			}
+		}
 		Delete struct {
 			MinAge string `json:"min_age"`
 		}
@@ -62,10 +67,11 @@ type Policy struct {
 }
 
 type policyDetail struct {
-	rolloverAge  string
-	rolloverSize string
-	deleteAge    string
-	policy       map[string]interface{}
+	rolloverAge           string
+	rolloverSize          string
+	deleteAge             string
+	readOnlyAfterRollover bool
+	policy                map[string]interface{}
 }
 
 type logrWrappedESLogger struct{}
@@ -405,17 +411,17 @@ func (es *esClient) listILMPolicies(ls *operatorv1.LogStorage) map[string]policy
 
 	// Retention is not set in LogStorage for l7, benchmark and events logs
 	return map[string]policyDetail{
-		"tigera_secure_ee_flows": buildILMPolicy(totalEsStorage, majorPctOfTotalDisk, 0.85, int(*ls.Spec.Retention.Flows)),
-		"tigera_secure_ee_dns":   buildILMPolicy(totalEsStorage, majorPctOfTotalDisk, 0.05, int(*ls.Spec.Retention.DNSLogs)),
-		"tigera_secure_ee_bgp":   buildILMPolicy(totalEsStorage, majorPctOfTotalDisk, 0.05, int(*ls.Spec.Retention.BGPLogs)),
-		"tigera_secure_ee_l7":    buildILMPolicy(totalEsStorage, majorPctOfTotalDisk, 0.05, 1),
+		"tigera_secure_ee_flows": buildILMPolicy(totalEsStorage, majorPctOfTotalDisk, 0.85, int(*ls.Spec.Retention.Flows), true),
+		"tigera_secure_ee_dns":   buildILMPolicy(totalEsStorage, majorPctOfTotalDisk, 0.05, int(*ls.Spec.Retention.DNSLogs), true),
+		"tigera_secure_ee_bgp":   buildILMPolicy(totalEsStorage, majorPctOfTotalDisk, 0.05, int(*ls.Spec.Retention.BGPLogs), true),
+		"tigera_secure_ee_l7":    buildILMPolicy(totalEsStorage, majorPctOfTotalDisk, 0.05, 1, true),
 
-		"tigera_secure_ee_audit_ee":           buildILMPolicy(totalEsStorage, minorPctOfTotalDisk, pctOfDisk, int(*ls.Spec.Retention.AuditReports)),
-		"tigera_secure_ee_audit_kube":         buildILMPolicy(totalEsStorage, minorPctOfTotalDisk, pctOfDisk, int(*ls.Spec.Retention.AuditReports)),
-		"tigera_secure_ee_snapshots":          buildILMPolicy(totalEsStorage, minorPctOfTotalDisk, pctOfDisk, int(*ls.Spec.Retention.Snapshots)),
-		"tigera_secure_ee_compliance_reports": buildILMPolicy(totalEsStorage, minorPctOfTotalDisk, pctOfDisk, int(*ls.Spec.Retention.ComplianceReports)),
-		"tigera_secure_ee_benchmark_results":  buildILMPolicy(totalEsStorage, minorPctOfTotalDisk, pctOfDisk, 91),
-		"tigera_secure_ee_events":             buildILMPolicy(totalEsStorage, minorPctOfTotalDisk, pctOfDisk, 91),
+		"tigera_secure_ee_audit_ee":           buildILMPolicy(totalEsStorage, minorPctOfTotalDisk, pctOfDisk, int(*ls.Spec.Retention.AuditReports), true),
+		"tigera_secure_ee_audit_kube":         buildILMPolicy(totalEsStorage, minorPctOfTotalDisk, pctOfDisk, int(*ls.Spec.Retention.AuditReports), true),
+		"tigera_secure_ee_snapshots":          buildILMPolicy(totalEsStorage, minorPctOfTotalDisk, pctOfDisk, int(*ls.Spec.Retention.Snapshots), true),
+		"tigera_secure_ee_compliance_reports": buildILMPolicy(totalEsStorage, minorPctOfTotalDisk, pctOfDisk, int(*ls.Spec.Retention.ComplianceReports), true),
+		"tigera_secure_ee_benchmark_results":  buildILMPolicy(totalEsStorage, minorPctOfTotalDisk, pctOfDisk, 91, true),
+		"tigera_secure_ee_events":             buildILMPolicy(totalEsStorage, minorPctOfTotalDisk, pctOfDisk, 91, false),
 	}
 }
 
@@ -433,24 +439,36 @@ func (es *esClient) createOrUpdatePolicies(ctx context.Context, listPolicy map[s
 		}
 
 		// If policy exists, check if it needs to be updated
-		currentMaxAge, currentMaxSize, currentMinAge, err := extractPolicyDetails(res[policyName].Policy)
+		currentMaxAge, currentMaxSize, currentMinAge, readOnlyAfterRollover, err := extractPolicyDetails(res[policyName].Policy)
 		if err != nil {
 			return err
 		}
 		if currentMaxAge != pd.rolloverAge ||
 			currentMaxSize != pd.rolloverSize ||
-			currentMinAge != pd.deleteAge {
+			currentMinAge != pd.deleteAge ||
+			readOnlyAfterRollover != pd.readOnlyAfterRollover {
 			return applyILMPolicy(ctx, es.client, indexName, pd.policy)
 		}
 	}
 	return nil
 }
 
-func buildILMPolicy(totalEsStorage int64, totalDiskPercentage float64, percentOfDiskForLogType float64, retention int) policyDetail {
+func buildILMPolicy(totalEsStorage int64, totalDiskPercentage float64, percentOfDiskForLogType float64, retention int, readOnlyAfterRollover bool) policyDetail {
 	pd := policyDetail{}
 	pd.rolloverSize = calculateRolloverSize(totalEsStorage, totalDiskPercentage, percentOfDiskForLogType)
 	pd.rolloverAge = calculateRolloverAge(retention)
 	pd.deleteAge = fmt.Sprintf("%dd", retention)
+	pd.readOnlyAfterRollover = readOnlyAfterRollover
+
+	warmActions := map[string]interface{}{
+		"set_priority": map[string]interface{}{
+			"priority": 50,
+		},
+	}
+
+	if readOnlyAfterRollover {
+		warmActions["readonly"] = map[string]interface{}{}
+	}
 
 	pd.policy = map[string]interface{}{
 		"policy": map[string]interface{}{
@@ -467,12 +485,7 @@ func buildILMPolicy(totalEsStorage int64, totalDiskPercentage float64, percentOf
 					},
 				},
 				"warm": map[string]interface{}{
-					"actions": map[string]interface{}{
-						"readonly": map[string]interface{}{},
-						"set_priority": map[string]interface{}{
-							"priority": 50,
-						},
-					},
+					"actions": warmActions,
 				},
 				"delete": map[string]interface{}{
 					"min_age": pd.deleteAge,
@@ -583,20 +596,21 @@ func getESRoots(ctx context.Context, client client.Client) (*x509.CertPool, erro
 	return roots, nil
 }
 
-func extractPolicyDetails(policy map[string]interface{}) (string, string, string, error) {
+func extractPolicyDetails(policy map[string]interface{}) (string, string, string, bool, error) {
 	jsonPolicy, err := json.Marshal(policy)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", true, err
 	}
 	existingPolicy := Policy{}
 	if err = json.Unmarshal(jsonPolicy, &existingPolicy); err != nil {
-		return "", "", "", err
+		return "", "", "", true, err
 	}
 
 	currentMaxAge := existingPolicy.Phases.Hot.Actions.Rollover.MaxAge
 	currentMaxSize := existingPolicy.Phases.Hot.Actions.Rollover.MaxSize
 	currentMinAge := existingPolicy.Phases.Delete.MinAge
-	return currentMaxAge, currentMaxSize, currentMinAge, nil
+	readOnlyAfterRollover := existingPolicy.Phases.Warm.Actions.Readonly != nil
+	return currentMaxAge, currentMaxSize, currentMinAge, readOnlyAfterRollover, nil
 }
 
 func getTotalEsDisk(ls *operatorv1.LogStorage) int64 {

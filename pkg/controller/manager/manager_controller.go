@@ -47,6 +47,7 @@ import (
 	tigerakvc "github.com/tigera/operator/pkg/render/common/authentication/tigera/key_validator_config"
 	relasticsearch "github.com/tigera/operator/pkg/render/common/elasticsearch"
 	"github.com/tigera/operator/pkg/render/common/networkpolicy"
+	"github.com/tigera/operator/pkg/render/logstorage/eck"
 	rmanager "github.com/tigera/operator/pkg/render/manager"
 	"github.com/tigera/operator/pkg/render/monitor"
 	"github.com/tigera/operator/pkg/tls/certificatemanagement"
@@ -159,7 +160,7 @@ func Add(mgr manager.Manager, opts options.AddOptions) error {
 		for _, secretName := range []string{
 			// We need to watch for es-gateway certificate because es-proxy still creates a
 			// client to talk to elastic via es-gateway
-			render.ManagerTLSSecretName, render.ElasticsearchManagerUserSecret, relasticsearch.PublicCertSecret,
+			render.ManagerTLSSecretName, relasticsearch.PublicCertSecret,
 			render.VoltronTunnelSecretName, render.ComplianceServerCertSecret, render.PacketCaptureServerCert,
 			render.ManagerInternalTLSSecretName, monitor.PrometheusServerTLSSecretName, certificatemanagement.CASecretName,
 		} {
@@ -182,7 +183,7 @@ func Add(mgr manager.Manager, opts options.AddOptions) error {
 	}
 
 	if !opts.ElasticExternal {
-		if err = utils.AddConfigMapWatch(c, render.ECKLicenseConfigMapName, render.ECKOperatorNamespace, eventHandler); err != nil {
+		if err = utils.AddConfigMapWatch(c, eck.LicenseConfigMapName, eck.OperatorNamespace, eventHandler); err != nil {
 			return fmt.Errorf("manager-controller failed to watch the ConfigMap resource: %v", err)
 		}
 	}
@@ -404,10 +405,19 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 		// and the bundle will simply use the root CA for the tenant. For single-tenant systems, we need to include these in case
 		// any of them haven't been signed by the root CA.
 		trustedSecretNames = []string{
-			render.PacketCaptureServerCert,
 			render.ProjectCalicoAPIServerTLSSecretName(installation.Variant),
 			render.TigeraLinseedSecret,
 		}
+
+		packetcaptureapi, err := utils.GetPacketCaptureAPI(ctx, r.client)
+		if err != nil && !errors.IsNotFound(err) {
+			r.status.SetDegraded(operatorv1.ResourceReadError, "Error querying PacketCapture CR", err, logc)
+			return reconcile.Result{}, err
+		}
+		if packetcaptureapi != nil {
+			trustedSecretNames = append(trustedSecretNames, render.PacketCaptureServerCert)
+		}
+
 		// This is necessary because prior to v3.13 secrets were not signed by a single CA, so we need to include each individually
 		// in the trusted bundle
 		esgwCertificate, err := certificateManager.GetCertificate(r.client, relasticsearch.PublicCertSecret, common.OperatorNamespace())
@@ -500,21 +510,6 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 				return reconcile.Result{}, nil
 			}
 			r.status.SetDegraded(operatorv1.ResourceReadError, "Failed to get the elasticsearch cluster configuration", err, logc)
-			return reconcile.Result{}, err
-		}
-	}
-
-	var esSecrets []*corev1.Secret
-	if !r.multiTenant {
-		// Get secrets used by the manager to authenticate with Elasticsearch. This is used for Kibana login, and isn't
-		// needed for multi-tenant installations since currently Kibana is not supported in that mode.
-		esSecrets, err = utils.ElasticsearchSecrets(ctx, []string{render.ElasticsearchManagerUserSecret}, r.client)
-		if err != nil {
-			if errors.IsNotFound(err) {
-				r.status.SetDegraded(operatorv1.ResourceNotFound, "Elasticsearch secrets are not available yet, waiting until they become available", err, logc)
-				return reconcile.Result{}, nil
-			}
-			r.status.SetDegraded(operatorv1.ResourceReadError, "Failed to get Elasticsearch credentials", err, logc)
 			return reconcile.Result{}, err
 		}
 	}
@@ -670,7 +665,6 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 	managerCfg := &render.ManagerConfiguration{
 		VoltronRouteConfig:      routeConfig,
 		KeyValidatorConfig:      keyValidatorConfig,
-		ESSecrets:               esSecrets,
 		TrustedCertBundle:       trustedBundle,
 		ClusterConfig:           clusterConfig,
 		TLSKeyPair:              tlsSecret,
