@@ -201,7 +201,6 @@ func newReconciler(mgr manager.Manager, opts options.AddOptions, licenseAPIReady
 		clusterDomain:   opts.ClusterDomain,
 		licenseAPIReady: licenseAPIReady,
 		tierWatchReady:  tierWatchReady,
-		usePSP:          opts.UsePSP,
 		multiTenant:     opts.MultiTenant,
 		elasticExternal: opts.ElasticExternal,
 	}
@@ -222,7 +221,6 @@ type ReconcileManager struct {
 	clusterDomain   string
 	licenseAPIReady *utils.ReadyFlag
 	tierWatchReady  *utils.ReadyFlag
-	usePSP          bool
 
 	// Whether or not the operator is running in multi-tenant mode.
 	multiTenant     bool
@@ -500,20 +498,6 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 		return reconcile.Result{}, err
 	}
 
-	var clusterConfig *relasticsearch.ClusterConfig
-	// We only require Elastic cluster configuration when Kibana is enabled.
-	if render.KibanaEnabled(tenant, installation) {
-		clusterConfig, err = utils.GetElasticsearchClusterConfig(context.Background(), r.client)
-		if err != nil {
-			if errors.IsNotFound(err) {
-				r.status.SetDegraded(operatorv1.ResourceNotFound, "Elasticsearch cluster configuration is not available, waiting for it to become available", err, logc)
-				return reconcile.Result{}, nil
-			}
-			r.status.SetDegraded(operatorv1.ResourceReadError, "Failed to get the elasticsearch cluster configuration", err, logc)
-			return reconcile.Result{}, err
-		}
-	}
-
 	managementCluster, err := utils.GetManagementCluster(ctx, r.client)
 	if err != nil {
 		r.status.SetDegraded(operatorv1.ResourceReadError, "Error reading ManagementCluster", err, logc)
@@ -666,11 +650,10 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 		VoltronRouteConfig:      routeConfig,
 		KeyValidatorConfig:      keyValidatorConfig,
 		TrustedCertBundle:       trustedBundle,
-		ClusterConfig:           clusterConfig,
 		TLSKeyPair:              tlsSecret,
 		VoltronLinseedKeyPair:   linseedVoltronServerCert,
 		PullSecrets:             pullSecrets,
-		Openshift:               r.provider == operatorv1.ProviderOpenShift,
+		OpenShift:               r.provider.IsOpenShift(),
 		Installation:            installation,
 		ManagementCluster:       managementCluster,
 		TunnelServerCert:        tunnelServerCert,
@@ -681,7 +664,6 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 		Compliance:              complianceCR,
 		ComplianceLicenseActive: complianceLicenseFeatureActive,
 		ComplianceNamespace:     utils.NewNamespaceHelper(r.multiTenant, render.ComplianceNamespace, request.Namespace).InstallNamespace(),
-		UsePSP:                  r.usePSP,
 		Namespace:               helper.InstallNamespace(),
 		TruthNamespace:          helper.TruthNamespace(),
 		Tenant:                  tenant,
@@ -755,12 +737,12 @@ func fillDefaults(mc *operatorv1.ManagementCluster) {
 
 func getVoltronRouteConfig(ctx context.Context, cli client.Client, managerNamespace string) (*rmanager.VoltronRouteConfig, error) {
 	terminatedRouteList := &operatorv1.TLSTerminatedRouteList{}
-	if err := cli.List(ctx, terminatedRouteList); err != nil {
+	if err := cli.List(ctx, terminatedRouteList, client.InNamespace(managerNamespace)); err != nil {
 		return nil, err
 	}
 
 	passThroughRouteList := &operatorv1.TLSPassThroughRouteList{}
-	if err := cli.List(ctx, passThroughRouteList); err != nil {
+	if err := cli.List(ctx, passThroughRouteList, client.InNamespace(managerNamespace)); err != nil {
 		return nil, err
 	}
 

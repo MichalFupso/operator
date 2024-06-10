@@ -20,11 +20,8 @@ import (
 	"strconv"
 	"strings"
 
-	ocsv1 "github.com/openshift/api/security/v1"
-
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -39,14 +36,13 @@ import (
 	tigerakvc "github.com/tigera/operator/pkg/render/common/authentication/tigera/key_validator_config"
 	rcomponents "github.com/tigera/operator/pkg/render/common/components"
 	"github.com/tigera/operator/pkg/render/common/configmap"
-	relasticsearch "github.com/tigera/operator/pkg/render/common/elasticsearch"
 	rkibana "github.com/tigera/operator/pkg/render/common/kibana"
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
 	"github.com/tigera/operator/pkg/render/common/networkpolicy"
 	"github.com/tigera/operator/pkg/render/common/podaffinity"
-	"github.com/tigera/operator/pkg/render/common/podsecuritypolicy"
 	"github.com/tigera/operator/pkg/render/common/secret"
 	"github.com/tigera/operator/pkg/render/common/securitycontext"
+	"github.com/tigera/operator/pkg/render/common/securitycontextconstraints"
 	"github.com/tigera/operator/pkg/render/manager"
 	"github.com/tigera/operator/pkg/tls/certificatemanagement"
 	"github.com/tigera/operator/pkg/tls/certkeyusage"
@@ -129,10 +125,8 @@ type ManagerConfiguration struct {
 	VoltronRouteConfig *manager.VoltronRouteConfig
 
 	KeyValidatorConfig authentication.KeyValidatorConfig
-	ESSecrets          []*corev1.Secret
-	ClusterConfig      *relasticsearch.ClusterConfig
 	PullSecrets        []*corev1.Secret
-	Openshift          bool
+	OpenShift          bool
 	Installation       *operatorv1.InstallationSpec
 	ManagementCluster  *operatorv1.ManagementCluster
 
@@ -162,8 +156,6 @@ type ManagerConfiguration struct {
 	ComplianceLicenseActive bool
 	ComplianceNamespace     string
 
-	// Whether the cluster supports pod security policies.
-	UsePSP            bool
 	Namespace         string
 	TruthNamespace    string
 	BindingNamespaces []string
@@ -234,12 +226,8 @@ func (c *managerComponent) Objects() ([]client.Object, []client.Object) {
 
 	objs = append(objs,
 		managerClusterRoleBinding(c.cfg.BindingNamespaces),
-		managerClusterRole(c.cfg.ManagementCluster != nil, false, c.cfg.UsePSP, c.cfg.Installation.KubernetesProvider),
+		managerClusterRole(false, c.cfg.Installation.KubernetesProvider, c.cfg.Tenant),
 	)
-
-	if c.cfg.UsePSP {
-		objs = append(objs, managerPodSecurityPolicy())
-	}
 
 	objs = append(objs, secret.ToRuntimeObjects(secret.CopyToNamespace(c.cfg.Namespace, c.cfg.PullSecrets...)...)...)
 	objs = append(objs,
@@ -254,12 +242,6 @@ func (c *managerComponent) Objects() ([]client.Object, []client.Object) {
 		objs = append(objs, c.cfg.VoltronRouteConfig.RoutesConfigMap(c.cfg.Namespace))
 	}
 
-	// If we're running on openshift, we need to add in an SCC.
-	if c.cfg.Openshift {
-		objs = append(objs, c.securityContextConstraints())
-	}
-
-	objs = append(objs, secret.ToRuntimeObjects(secret.CopyToNamespace(c.cfg.Namespace, c.cfg.ESSecrets...)...)...)
 	objs = append(objs, c.managerDeployment())
 	if c.cfg.KeyValidatorConfig != nil {
 		objs = append(objs, configmap.ToRuntimeObjects(c.cfg.KeyValidatorConfig.RequiredConfigMaps(c.cfg.Namespace)...)...)
@@ -308,7 +290,7 @@ func (c *managerComponent) managerDeployment() *appsv1.Deployment {
 		}
 	}
 
-	podTemplate := relasticsearch.DecorateAnnotations(&corev1.PodTemplateSpec{
+	podTemplate := &corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        ManagerDeploymentName,
 			Namespace:   c.cfg.Namespace,
@@ -323,7 +305,7 @@ func (c *managerComponent) managerDeployment() *appsv1.Deployment {
 			Containers:         managerPodContainers,
 			Volumes:            c.managerVolumes(),
 		},
-	}, c.cfg.ESSecrets).(*corev1.PodTemplateSpec)
+	}
 
 	if c.cfg.Replicas != nil && *c.cfg.Replicas > 1 {
 		podTemplate.Spec.Affinity = podaffinity.NewPodAntiAffinity("tigera-manager", c.cfg.Namespace)
@@ -449,10 +431,6 @@ func (c *managerComponent) managerEnvVars() []corev1.EnvVar {
 		{Name: "CNX_POLICY_RECOMMENDATION_SUPPORT", Value: "true"},
 		{Name: "ENABLE_MULTI_CLUSTER_MANAGEMENT", Value: strconv.FormatBool(c.cfg.ManagementCluster != nil)},
 		{Name: "ENABLE_KIBANA", Value: strconv.FormatBool(KibanaEnabled(c.cfg.Tenant, c.cfg.Installation))},
-		// The manager supports two states of a product feature being unavailable: the product feature being feature-flagged off,
-		// and the current license not enabling the feature. The compliance flag that we set on the manager container is a feature
-		// flag, which we should set purely based on whether the compliance CR is present, ignoring the license status.
-		{Name: "ENABLE_COMPLIANCE_REPORTS", Value: strconv.FormatBool(c.cfg.Compliance != nil)},
 	}
 
 	envs = append(envs, c.managerOAuth2EnvVars()...)
@@ -540,7 +518,7 @@ func (c *managerComponent) voltronContainer() corev1.Container {
 		{Name: "VOLTRON_ENABLE_MULTI_CLUSTER_MANAGEMENT", Value: strconv.FormatBool(c.cfg.ManagementCluster != nil)},
 		{Name: "VOLTRON_TUNNEL_PORT", Value: defaultTunnelVoltronPort},
 		{Name: "VOLTRON_DEFAULT_FORWARD_SERVER", Value: defaultForwardServer},
-		{Name: "VOLTRON_ENABLE_COMPLIANCE", Value: strconv.FormatBool(c.cfg.Compliance != nil && c.cfg.ComplianceLicenseActive)},
+		{Name: "VOLTRON_ENABLE_COMPLIANCE", Value: strconv.FormatBool(c.cfg.ComplianceLicenseActive)},
 		{Name: "VOLTRON_FIPS_MODE_ENABLED", Value: operatorv1.IsFIPSModeEnabledString(c.cfg.Installation.FIPSMode)},
 	}
 
@@ -700,12 +678,8 @@ func managerClusterRoleBinding(namespaces []string) client.Object {
 	return rcomponents.ClusterRoleBinding(ManagerClusterRoleBinding, ManagerClusterRole, ManagerServiceAccount, namespaces)
 }
 
-func managerPodSecurityPolicy() *policyv1beta1.PodSecurityPolicy {
-	return podsecuritypolicy.NewBasePolicy("tigera-manager")
-}
-
 // managerClusterRole returns a clusterrole that allows authn/authz review requests.
-func managerClusterRole(managementCluster, managedCluster, usePSP bool, kubernetesProvider operatorv1.Provider) *rbacv1.ClusterRole {
+func managerClusterRole(managedCluster bool, kubernetesProvider operatorv1.Provider, tenant *operatorv1.Tenant) *rbacv1.ClusterRole {
 	cr := &rbacv1.ClusterRole{
 		TypeMeta: metav1.TypeMeta{Kind: "ClusterRole", APIVersion: "rbac.authorization.k8s.io/v1"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -848,53 +822,28 @@ func managerClusterRole(managementCluster, managedCluster, usePSP bool, kubernet
 		)
 	}
 
-	if usePSP {
-		// Allow access to the pod security policy in case this is enforced on the cluster
+	if tenant.MultiTenant() {
 		cr.Rules = append(cr.Rules,
 			rbacv1.PolicyRule{
-				APIGroups:     []string{"policy"},
-				Resources:     []string{"podsecuritypolicies"},
-				Verbs:         []string{"use"},
-				ResourceNames: []string{"tigera-manager"},
+				APIGroups: []string{"authorization.k8s.io"},
+				Resources: []string{"localsubjectaccessreviews"},
+				Verbs:     []string{"create"},
 			},
 		)
 	}
 
-	if kubernetesProvider == operatorv1.ProviderOpenShift {
+	if kubernetesProvider.IsOpenShift() {
 		cr.Rules = append(cr.Rules,
 			rbacv1.PolicyRule{
 				APIGroups:     []string{"security.openshift.io"},
 				Resources:     []string{"securitycontextconstraints"},
 				Verbs:         []string{"use"},
-				ResourceNames: []string{PSSPrivileged},
+				ResourceNames: []string{securitycontextconstraints.NonRootV2},
 			},
 		)
 	}
 
 	return cr
-}
-
-// TODO: Can we get rid of this and instead just bind to default ones?
-func (c *managerComponent) securityContextConstraints() *ocsv1.SecurityContextConstraints {
-	privilegeEscalation := false
-	return &ocsv1.SecurityContextConstraints{
-		TypeMeta:                 metav1.TypeMeta{Kind: "SecurityContextConstraints", APIVersion: "security.openshift.io/v1"},
-		ObjectMeta:               metav1.ObjectMeta{Name: c.cfg.Namespace},
-		AllowHostDirVolumePlugin: true,
-		AllowHostIPC:             false,
-		AllowHostNetwork:         false,
-		AllowHostPID:             true,
-		AllowHostPorts:           false,
-		AllowPrivilegeEscalation: &privilegeEscalation,
-		AllowPrivilegedContainer: false,
-		FSGroup:                  ocsv1.FSGroupStrategyOptions{Type: ocsv1.FSGroupStrategyRunAsAny},
-		RunAsUser:                ocsv1.RunAsUserStrategyOptions{Type: ocsv1.RunAsUserStrategyRunAsAny},
-		ReadOnlyRootFilesystem:   false,
-		SELinuxContext:           ocsv1.SELinuxContextStrategyOptions{Type: ocsv1.SELinuxStrategyMustRunAs},
-		SupplementalGroups:       ocsv1.SupplementalGroupsStrategyOptions{Type: ocsv1.SupplementalGroupsStrategyRunAsAny},
-		Users:                    []string{fmt.Sprintf("system:serviceaccount:%s:tigera-manager", c.cfg.Namespace)},
-		Volumes:                  []ocsv1.FSType{"*"},
-	}
 }
 
 func (c *managerComponent) getTLSObjects() []client.Object {
@@ -953,7 +902,7 @@ func (c *managerComponent) managerAllowTigeraNetworkPolicy() *v3.NetworkPolicy {
 			Destination: networkpolicy.KubeAPIServerServiceSelectorEntityRule,
 		},
 	}
-	egressRules = networkpolicy.AppendDNSEgressRules(egressRules, c.cfg.Openshift)
+	egressRules = networkpolicy.AppendDNSEgressRules(egressRules, c.cfg.OpenShift)
 	egressRules = append(egressRules, v3.Rule{
 		Action:      v3.Allow,
 		Protocol:    &networkpolicy.TCPProtocol,

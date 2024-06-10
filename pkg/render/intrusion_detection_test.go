@@ -104,7 +104,7 @@ var _ = Describe("Intrusion Detection rendering tests", func() {
 	})
 
 	It("should render all resources for a default configuration", func() {
-		cfg.Openshift = notOpenshift
+		cfg.OpenShift = false
 		component := render.IntrusionDetection(cfg)
 		resources, _ := component.Objects()
 
@@ -250,7 +250,7 @@ var _ = Describe("Intrusion Detection rendering tests", func() {
 	})
 
 	It("should render finalizers rbac resources in the IDS ClusterRole for an Openshift management/standalone cluster", func() {
-		cfg.Openshift = openshift
+		cfg.OpenShift = true
 		cfg.Installation.KubernetesProvider = operatorv1.ProviderOpenShift
 		cfg.ManagedCluster = false
 		component := render.IntrusionDetection(cfg)
@@ -275,7 +275,7 @@ var _ = Describe("Intrusion Detection rendering tests", func() {
 				},
 			},
 		}
-		cfg.Openshift = notOpenshift
+		cfg.OpenShift = false
 
 		component := render.IntrusionDetection(cfg)
 		resources, _ := component.Objects()
@@ -348,7 +348,7 @@ var _ = Describe("Intrusion Detection rendering tests", func() {
 	})
 
 	It("should disable GlobalAlert controller when cluster is managed", func() {
-		cfg.Openshift = notOpenshift
+		cfg.OpenShift = false
 		cfg.ManagedCluster = managedCluster
 
 		component := render.IntrusionDetection(cfg)
@@ -414,15 +414,20 @@ var _ = Describe("Intrusion Detection rendering tests", func() {
 		}))
 	})
 
-	It("should render properly when PSP is not supported by the cluster", func() {
+	It("should render SecurityContextConstrains properly when provider is OpenShift", func() {
+		cfg.Installation.KubernetesProvider = operatorv1.ProviderOpenShift
+		cfg.OpenShift = true
 		component := render.IntrusionDetection(cfg)
 		Expect(component.ResolveImages(nil)).To(BeNil())
 		resources, _ := component.Objects()
 
-		// Should not contain any PodSecurityPolicies
-		for _, r := range resources {
-			Expect(r.GetObjectKind().GroupVersionKind().Kind).NotTo(Equal("PodSecurityPolicy"))
-		}
+		role := rtest.GetResource(resources, "intrusion-detection-controller", "", "rbac.authorization.k8s.io", "v1", "ClusterRole").(*rbacv1.ClusterRole)
+		Expect(role.Rules).To(ContainElement(rbacv1.PolicyRule{
+			APIGroups:     []string{"security.openshift.io"},
+			Resources:     []string{"securitycontextconstraints"},
+			Verbs:         []string{"use"},
+			ResourceNames: []string{"nonroot-v2"},
+		}))
 	})
 
 	It("should apply controlPlaneNodeSelector correctly", func() {
@@ -471,7 +476,7 @@ var _ = Describe("Intrusion Detection rendering tests", func() {
 
 		DescribeTable("should render allow-tigera policy",
 			func(scenario testutils.AllowTigeraScenario) {
-				cfg.Openshift = scenario.Openshift
+				cfg.OpenShift = scenario.OpenShift
 				cfg.ManagedCluster = scenario.ManagedCluster
 				component := render.IntrusionDetection(cfg)
 				resources, _ := component.Objects()
@@ -482,10 +487,10 @@ var _ = Describe("Intrusion Detection rendering tests", func() {
 					Expect(policy).To(Equal(expectedPolicy))
 				}
 			},
-			Entry("for management/standalone, kube-dns", testutils.AllowTigeraScenario{ManagedCluster: false, Openshift: false}),
-			Entry("for management/standalone, openshift-dns", testutils.AllowTigeraScenario{ManagedCluster: false, Openshift: true}),
-			Entry("for managed, kube-dns", testutils.AllowTigeraScenario{ManagedCluster: true, Openshift: false}),
-			Entry("for managed, openshift-dns", testutils.AllowTigeraScenario{ManagedCluster: true, Openshift: true}),
+			Entry("for management/standalone, kube-dns", testutils.AllowTigeraScenario{ManagedCluster: false, OpenShift: false}),
+			Entry("for management/standalone, openshift-dns", testutils.AllowTigeraScenario{ManagedCluster: false, OpenShift: true}),
+			Entry("for managed, kube-dns", testutils.AllowTigeraScenario{ManagedCluster: true, OpenShift: false}),
+			Entry("for managed, openshift-dns", testutils.AllowTigeraScenario{ManagedCluster: true, OpenShift: true}),
 		)
 	})
 

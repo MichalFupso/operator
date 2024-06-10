@@ -17,9 +17,10 @@ package render_test
 import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	operatorv1 "github.com/tigera/operator/api/v1"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	operatorv1 "github.com/tigera/operator/api/v1"
 	"github.com/tigera/operator/pkg/render"
 	rtest "github.com/tigera/operator/pkg/render/common/test"
 )
@@ -54,6 +55,7 @@ var _ = Describe("Namespace rendering tests", func() {
 		Expect(meta.GetLabels()["openshift.io/run-level"]).To(Equal("0"))
 		Expect(meta.GetLabels()).NotTo(ContainElement("control-plane"))
 		Expect(meta.GetAnnotations()["openshift.io/node-selector"]).To(Equal(""))
+		Expect(meta.GetAnnotations()["security.openshift.io/scc.podSecurityLabelSync"]).To(Equal("false"))
 	})
 
 	It("should render a namespace for aks", func() {
@@ -65,29 +67,5 @@ var _ = Describe("Namespace rendering tests", func() {
 		meta := resources[0].(metav1.ObjectMetaAccessor).GetObjectMeta()
 		Expect(meta.GetLabels()).NotTo(ContainElement("openshift.io/run-level"))
 		Expect(meta.GetLabels()["control-plane"]).To(Equal("true"))
-	})
-
-	It("should render a namespace for tigera-dex on EE", func() {
-		cfg.Installation.Variant = operatorv1.TigeraSecureEnterprise
-		component := render.Namespaces(cfg)
-		resources, _ := component.Objects()
-		Expect(len(resources)).To(Equal(2))
-		rtest.ExpectResourceTypeAndObjectMetadata(resources[1], "tigera-dex", "", "", "v1", "Namespace")
-		meta := resources[1].(metav1.ObjectMetaAccessor).GetObjectMeta()
-		Expect(meta.GetLabels()["name"]).To(Equal("tigera-dex"))
-		Expect(meta.GetLabels()).NotTo(ContainElement("openshift.io/run-level"))
-		Expect(meta.GetAnnotations()).NotTo(ContainElement("openshift.io/node-selector"))
-	})
-
-	It("should render a namespace for tigera-dex for openshift on EE", func() {
-		cfg.Installation.Variant = operatorv1.TigeraSecureEnterprise
-		cfg.Installation.KubernetesProvider = operatorv1.ProviderOpenShift
-		component := render.Namespaces(cfg)
-		resources, _ := component.Objects()
-		Expect(len(resources)).To(Equal(2))
-		rtest.ExpectResourceTypeAndObjectMetadata(resources[1], "tigera-dex", "", "", "v1", "Namespace")
-		meta := resources[1].(metav1.ObjectMetaAccessor).GetObjectMeta()
-		Expect(meta.GetLabels()["openshift.io/run-level"]).To(Equal("0"))
-		Expect(meta.GetAnnotations()["openshift.io/node-selector"]).To(Equal(""))
 	})
 })

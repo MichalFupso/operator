@@ -18,34 +18,34 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/tigera/operator/pkg/controller/tenancy"
-
-	"k8s.io/apimachinery/pkg/types"
-
-	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
-	"github.com/tigera/operator/pkg/render/common/networkpolicy"
-
-	operatorv1 "github.com/tigera/operator/api/v1"
-	"github.com/tigera/operator/pkg/common"
-	"github.com/tigera/operator/pkg/controller/certificatemanager"
-	"github.com/tigera/operator/pkg/controller/options"
-	"github.com/tigera/operator/pkg/controller/status"
-	"github.com/tigera/operator/pkg/controller/utils"
-	"github.com/tigera/operator/pkg/controller/utils/imageset"
-	"github.com/tigera/operator/pkg/ctrlruntime"
-	"github.com/tigera/operator/pkg/dns"
-	"github.com/tigera/operator/pkg/render"
-	rcertificatemanagement "github.com/tigera/operator/pkg/render/certificatemanagement"
-	"github.com/tigera/operator/pkg/tls/certificatemanagement"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
+
+	operatorv1 "github.com/tigera/operator/api/v1"
+	"github.com/tigera/operator/pkg/common"
+	"github.com/tigera/operator/pkg/controller/certificatemanager"
+	"github.com/tigera/operator/pkg/controller/options"
+	"github.com/tigera/operator/pkg/controller/status"
+	"github.com/tigera/operator/pkg/controller/tenancy"
+	"github.com/tigera/operator/pkg/controller/utils"
+	"github.com/tigera/operator/pkg/controller/utils/imageset"
+	"github.com/tigera/operator/pkg/ctrlruntime"
+	"github.com/tigera/operator/pkg/dns"
+	"github.com/tigera/operator/pkg/render"
+	rcertificatemanagement "github.com/tigera/operator/pkg/render/certificatemanagement"
+	"github.com/tigera/operator/pkg/render/common/networkpolicy"
+	"github.com/tigera/operator/pkg/tls/certificatemanagement"
 )
 
 const ResourceName = "compliance"
@@ -161,7 +161,6 @@ func newReconciler(mgr manager.Manager, opts options.AddOptions, licenseAPIReady
 		clusterDomain:   opts.ClusterDomain,
 		licenseAPIReady: licenseAPIReady,
 		tierWatchReady:  tierWatchReady,
-		usePSP:          opts.UsePSP,
 		multiTenant:     opts.MultiTenant,
 		externalElastic: opts.ElasticExternal,
 	}
@@ -183,7 +182,6 @@ type ReconcileCompliance struct {
 	clusterDomain   string
 	licenseAPIReady *utils.ReadyFlag
 	tierWatchReady  *utils.ReadyFlag
-	usePSP          bool
 	multiTenant     bool
 	externalElastic bool
 }
@@ -440,7 +438,7 @@ func (r *ReconcileCompliance) Reconcile(ctx context.Context, request reconcile.R
 	namespaceComp := render.NewPassthrough(render.CreateNamespace(helper.InstallNamespace(), network.KubernetesProvider, render.PSSPrivileged))
 
 	hasNoLicense := !utils.IsFeatureActive(license, common.ComplianceFeature)
-	openshift := r.provider == operatorv1.ProviderOpenShift
+	openshift := r.provider.IsOpenShift()
 	complianceCfg := &render.ComplianceConfiguration{
 		TrustedBundle:               trustedBundle,
 		Installation:                network,
@@ -450,13 +448,12 @@ func (r *ReconcileCompliance) Reconcile(ctx context.Context, request reconcile.R
 		SnapshotterKeyPair:          snapshotterKeyPair.Interface,
 		ReporterKeyPair:             reporterKeyPair.Interface,
 		PullSecrets:                 pullSecrets,
-		Openshift:                   openshift,
+		OpenShift:                   openshift,
 		ManagementCluster:           managementCluster,
 		ManagementClusterConnection: managementClusterConnection,
 		KeyValidatorConfig:          keyValidatorConfig,
 		ClusterDomain:               r.clusterDomain,
 		HasNoLicense:                hasNoLicense,
-		UsePSP:                      r.usePSP,
 		Namespace:                   helper.InstallNamespace(),
 		Tenant:                      tenant,
 		Compliance:                  instance,

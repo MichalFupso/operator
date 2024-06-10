@@ -22,6 +22,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	operatorv1 "github.com/tigera/operator/api/v1"
@@ -51,7 +52,6 @@ var _ = Describe("Tigera Secure Application Layer rendering tests", func() {
 			Installation: installation,
 			OsType:       rmeta.OSTypeLinux,
 			LogsEnabled:  true,
-			UsePSP:       true,
 		}
 	})
 
@@ -68,9 +68,9 @@ var _ = Describe("Tigera Secure Application Layer rendering tests", func() {
 			{name: applicationlayer.ApplicationLayerDaemonsetName, ns: common.CalicoNamespace, group: "apps", version: "v1", kind: "DaemonSet"},
 			{name: "application-layer", ns: "calico-system", group: "rbac.authorization.k8s.io", version: "v1", kind: "Role"},
 			{name: "application-layer", ns: "calico-system", group: "rbac.authorization.k8s.io", version: "v1", kind: "RoleBinding"},
-			{name: "application-layer", ns: "", group: "policy", version: "v1beta1", kind: "PodSecurityPolicy"},
 		}
 		// Should render the correct resources.
+		cfg.Installation.KubernetesProvider = operatorv1.ProviderOpenShift
 		component := applicationlayer.ApplicationLayer(cfg)
 		resources, _ := component.Objects()
 		Expect(resources).To(HaveLen(len(expectedResources)))
@@ -278,16 +278,19 @@ var _ = Describe("Tigera Secure Application Layer rendering tests", func() {
 
 	})
 
-	It("should render properly when PSP is not supported by the cluster", func() {
-		cfg.UsePSP = false
+	It("should render SecurityContextConstrains properly when provider is OpenShift", func() {
+		cfg.Installation.KubernetesProvider = operatorv1.ProviderOpenShift
 		component := applicationlayer.ApplicationLayer(cfg)
 		Expect(component.ResolveImages(nil)).To(BeNil())
 		resources, _ := component.Objects()
 
-		// Should not contain any PodSecurityPolicies
-		for _, r := range resources {
-			Expect(r.GetObjectKind().GroupVersionKind().Kind).NotTo(Equal("PodSecurityPolicy"))
-		}
+		role := rtest.GetResource(resources, "application-layer", "calico-system", "rbac.authorization.k8s.io", "v1", "Role").(*rbacv1.Role)
+		Expect(role.Rules).To(ContainElement(rbacv1.PolicyRule{
+			APIGroups:     []string{"security.openshift.io"},
+			Resources:     []string{"securitycontextconstraints"},
+			Verbs:         []string{"use"},
+			ResourceNames: []string{"privileged"},
+		}))
 	})
 
 	It("should render with custom l7 collector configuration", func() {

@@ -25,7 +25,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -40,8 +39,8 @@ import (
 	rcomp "github.com/tigera/operator/pkg/render/common/components"
 	"github.com/tigera/operator/pkg/render/common/configmap"
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
-	"github.com/tigera/operator/pkg/render/common/podsecuritypolicy"
 	"github.com/tigera/operator/pkg/render/common/securitycontext"
+	"github.com/tigera/operator/pkg/render/common/securitycontextconstraints"
 	"github.com/tigera/operator/pkg/tls/certificatemanagement"
 )
 
@@ -125,9 +124,6 @@ type NodeConfiguration struct {
 	// The bindMode read from the default BGPConfiguration. Used to trigger rolling updates
 	// should this value change.
 	BindMode string
-
-	// Whether the cluster supports pod security policies.
-	UsePSP bool
 }
 
 // Node creates the node daemonset and other resources for the daemonset to operate normally.
@@ -225,12 +221,8 @@ func (c *nodeComponent) Objects() ([]client.Object, []client.Object) {
 		objs = append(objs, btcm)
 	}
 
-	if c.cfg.Installation.KubernetesProvider == operatorv1.ProviderDockerEE {
+	if c.cfg.Installation.KubernetesProvider.IsDockerEE() {
 		objs = append(objs, c.clusterAdminClusterRoleBinding())
-	}
-
-	if c.cfg.UsePSP {
-		objs = append(objs, c.nodePodSecurityPolicy())
 	}
 
 	objs = append(objs, c.nodeDaemonset(cniConfig))
@@ -539,21 +531,12 @@ func (c *nodeComponent) nodeRole() *rbacv1.ClusterRole {
 		}
 		role.Rules = append(role.Rules, extraRules...)
 	}
-	if c.cfg.UsePSP {
-		// Allow access to the pod security policy in case this is enforced on the cluster
-		role.Rules = append(role.Rules, rbacv1.PolicyRule{
-			APIGroups:     []string{"policy"},
-			Resources:     []string{"podsecuritypolicies"},
-			Verbs:         []string{"use"},
-			ResourceNames: []string{common.NodeDaemonSetName},
-		})
-	}
-	if c.cfg.Installation.KubernetesProvider == operatorv1.ProviderOpenShift {
+	if c.cfg.Installation.KubernetesProvider.IsOpenShift() {
 		role.Rules = append(role.Rules, rbacv1.PolicyRule{
 			APIGroups:     []string{"security.openshift.io"},
 			Resources:     []string{"securitycontextconstraints"},
 			Verbs:         []string{"use"},
-			ResourceNames: []string{PSSPrivileged},
+			ResourceNames: []string{securitycontextconstraints.Privileged},
 		})
 	}
 	return role
@@ -930,7 +913,7 @@ func (c *nodeComponent) nodeDaemonset(cniCfgMap *corev1.ConfigMap) *appsv1.Daemo
 	}
 
 	var affinity *corev1.Affinity
-	if c.cfg.Installation.KubernetesProvider == operatorv1.ProviderAKS {
+	if c.cfg.Installation.KubernetesProvider.IsAKS() {
 		affinity = &corev1.Affinity{
 			NodeAffinity: &corev1.NodeAffinity{
 				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
@@ -944,7 +927,7 @@ func (c *nodeComponent) nodeDaemonset(cniCfgMap *corev1.ConfigMap) *appsv1.Daemo
 				},
 			},
 		}
-	} else if c.cfg.Installation.KubernetesProvider == operatorv1.ProviderEKS {
+	} else if c.cfg.Installation.KubernetesProvider.IsEKS() {
 		affinity = &corev1.Affinity{
 			NodeAffinity: &corev1.NodeAffinity{
 				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
@@ -1474,7 +1457,7 @@ func (c *nodeComponent) nodeEnvVars() []corev1.EnvVar {
 			Name:  "FELIX_XDPENABLED",
 			Value: "false",
 		})
-		if c.cfg.Installation.KubernetesProvider == operatorv1.ProviderEKS {
+		if c.cfg.Installation.KubernetesProvider.IsEKS() {
 			nodeEnv = append(nodeEnv, corev1.EnvVar{
 				Name:  "FELIX_AWSSRCDSTCHECK",
 				Value: "Disable",
@@ -1749,22 +1732,6 @@ func (c *nodeComponent) nodeMetricsService() *corev1.Service {
 			},
 		},
 	}
-}
-
-func (c *nodeComponent) nodePodSecurityPolicy() *policyv1beta1.PodSecurityPolicy {
-	psp := podsecuritypolicy.NewBasePolicy(common.NodeDaemonSetName)
-	psp.Spec.Privileged = true
-	psp.Spec.AllowPrivilegeEscalation = ptr.BoolToPtr(true)
-	psp.Spec.Volumes = append(psp.Spec.Volumes, policyv1beta1.HostPath)
-	psp.Spec.HostNetwork = true
-	// CollectProcessPath feature in logCollectorSpec requires access to hostPID
-	// Hence setting hostPID to true in the calico-node PSP, for this feature
-	// to work with PSP turned on
-	if c.collectProcessPathEnabled() {
-		psp.Spec.HostPID = true
-	}
-	psp.Spec.RunAsUser.Rule = policyv1beta1.RunAsUserStrategyRunAsAny
-	return psp
 }
 
 // hostPathInitContainer creates an init container that changes the permissions on hostPath volumes

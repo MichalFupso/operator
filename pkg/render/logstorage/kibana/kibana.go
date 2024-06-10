@@ -21,14 +21,15 @@ import (
 
 	cmnv1 "github.com/elastic/cloud-on-k8s/v2/pkg/apis/common/v1"
 	kbv1 "github.com/elastic/cloud-on-k8s/v2/pkg/apis/kibana/v1"
+
 	corev1 "k8s.io/api/core/v1"
-	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
+
 	operatorv1 "github.com/tigera/operator/api/v1"
 	"github.com/tigera/operator/pkg/components"
 	"github.com/tigera/operator/pkg/dns"
@@ -37,9 +38,9 @@ import (
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
 	"github.com/tigera/operator/pkg/render/common/networkpolicy"
 	"github.com/tigera/operator/pkg/render/common/podaffinity"
-	"github.com/tigera/operator/pkg/render/common/podsecuritypolicy"
 	"github.com/tigera/operator/pkg/render/common/secret"
 	"github.com/tigera/operator/pkg/render/common/securitycontext"
+	"github.com/tigera/operator/pkg/render/common/securitycontextconstraints"
 	"github.com/tigera/operator/pkg/tls/certificatemanagement"
 )
 
@@ -93,9 +94,6 @@ type Configuration struct {
 	TrustedBundle   certificatemanagement.TrustedBundleRO
 	UnusedTLSSecret *corev1.Secret
 	Enabled         bool
-
-	// Whether the cluster supports pod security policies.
-	UsePSP bool
 }
 
 type kibana struct {
@@ -151,16 +149,6 @@ func (k *kibana) Objects() ([]client.Object, []client.Object) {
 		return toCreate, toDelete
 	}
 
-	if k.cfg.UsePSP {
-		if k.cfg.Enabled {
-			toCreate = append(toCreate,
-				k.clusterRoleBinding(),
-				k.clusterRole(),
-				k.kibanaPodSecurityPolicy(),
-			)
-		}
-	}
-
 	if k.cfg.Enabled {
 		// Kibana CRs
 		// In order to use restricted, we need to change elastic-internal-init-config:
@@ -172,6 +160,10 @@ func (k *kibana) Objects() ([]client.Object, []client.Object) {
 		toCreate = append(toCreate, k.allowTigeraPolicy())
 		toCreate = append(toCreate, networkpolicy.AllowTigeraDefaultDeny(Namespace))
 		toCreate = append(toCreate, k.serviceAccount())
+
+		if k.cfg.Installation.KubernetesProvider.IsOpenShift() {
+			toCreate = append(toCreate, k.clusterRole(), k.clusterRoleBinding())
+		}
 
 		if len(k.cfg.PullSecrets) > 0 {
 			toCreate = append(toCreate, secret.ToRuntimeObjects(secret.CopyToNamespace(Namespace, k.cfg.PullSecrets...)...)...)
@@ -369,16 +361,16 @@ func (k *kibana) kibanaCR() *kbv1.Kibana {
 
 func (k *kibana) clusterRole() *rbacv1.ClusterRole {
 	return &rbacv1.ClusterRole{
+		TypeMeta: metav1.TypeMeta{Kind: "ClusterRole", APIVersion: "rbac.authorization.k8s.io/v1"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name: ObjectName,
 		},
 		Rules: []rbacv1.PolicyRule{
 			{
-				// Allow access to the pod security policy in case this is enforced on the cluster
-				APIGroups:     []string{"policy"},
-				Resources:     []string{"podsecuritypolicies"},
+				APIGroups:     []string{"security.openshift.io"},
+				Resources:     []string{"securitycontextconstraints"},
 				Verbs:         []string{"use"},
-				ResourceNames: []string{ObjectName},
+				ResourceNames: []string{securitycontextconstraints.NonRootV2},
 			},
 		},
 	}
@@ -404,10 +396,6 @@ func (k *kibana) clusterRoleBinding() *rbacv1.ClusterRoleBinding {
 	}
 }
 
-func (k *kibana) kibanaPodSecurityPolicy() *policyv1beta1.PodSecurityPolicy {
-	return podsecuritypolicy.NewBasePolicy(ObjectName)
-}
-
 // Allow access to Kibana
 func (k *kibana) allowTigeraPolicy() *v3.NetworkPolicy {
 	egressRules := []v3.Rule{
@@ -418,7 +406,7 @@ func (k *kibana) allowTigeraPolicy() *v3.NetworkPolicy {
 			Destination: render.ElasticsearchEntityRule,
 		},
 	}
-	egressRules = networkpolicy.AppendDNSEgressRules(egressRules, k.cfg.Provider == operatorv1.ProviderOpenShift)
+	egressRules = networkpolicy.AppendDNSEgressRules(egressRules, k.cfg.Provider.IsOpenShift())
 	egressRules = append(egressRules, []v3.Rule{
 		{
 			Action:      v3.Allow,

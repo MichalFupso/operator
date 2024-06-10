@@ -18,26 +18,25 @@ import (
 	"crypto/x509"
 	"fmt"
 
-	rcomponents "github.com/tigera/operator/pkg/render/common/components"
-
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
+
 	operatorv1 "github.com/tigera/operator/api/v1"
 	"github.com/tigera/operator/pkg/components"
+	rcomponents "github.com/tigera/operator/pkg/render/common/components"
 	relasticsearch "github.com/tigera/operator/pkg/render/common/elasticsearch"
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
 	"github.com/tigera/operator/pkg/render/common/networkpolicy"
-	"github.com/tigera/operator/pkg/render/common/podsecuritypolicy"
 	"github.com/tigera/operator/pkg/render/common/resourcequota"
 	"github.com/tigera/operator/pkg/render/common/secret"
 	"github.com/tigera/operator/pkg/render/common/securitycontext"
+	"github.com/tigera/operator/pkg/render/common/securitycontextconstraints"
 	"github.com/tigera/operator/pkg/tls/certificatemanagement"
 	"github.com/tigera/operator/pkg/tls/certkeyusage"
 	"github.com/tigera/operator/pkg/url"
@@ -171,13 +170,13 @@ type FluentdConfiguration struct {
 	Tenant          *operatorv1.Tenant
 	ExternalElastic bool
 
-	// Whether the cluster supports pod security policies.
-	UsePSP bool
 	// Whether to use User provided certificate or not.
 	UseSyslogCertificate bool
 
 	// EKSLogForwarderKeyPair contains the certificate presented by EKS LogForwarder when communicating with Linseed
 	EKSLogForwarderKeyPair certificatemanagement.KeyPairInterface
+
+	PacketCapture *operatorv1.PacketCaptureAPI
 }
 
 type fluentdComponent struct {
@@ -280,7 +279,7 @@ func (c *fluentdComponent) Objects() ([]client.Object, []client.Object) {
 	objs = append(objs, secret.ToRuntimeObjects(secret.CopyToNamespace(LogCollectorNamespace, c.cfg.PullSecrets...)...)...)
 	objs = append(objs, c.metricsService())
 
-	if c.cfg.Installation.KubernetesProvider == operatorv1.ProviderGKE {
+	if c.cfg.Installation.KubernetesProvider.IsGKE() {
 		// We do this only for GKE as other providers don't (yet?)
 		// automatically add resource quota that constrains whether
 		// components that are marked cluster or node critical
@@ -301,9 +300,6 @@ func (c *fluentdComponent) Objects() ([]client.Object, []client.Object) {
 			c.eksLogForwarderClusterRole(),
 			c.eksLogForwarderClusterRoleBinding())
 
-		if c.cfg.UsePSP {
-			objs = append(objs, c.eksLogForwarderPodSecurityPolicy())
-		}
 		objs = append(objs, c.eksLogForwarderServiceAccount(),
 			c.eksLogForwarderSecret(),
 			c.eksLogForwarderDeployment())
@@ -320,14 +316,11 @@ func (c *fluentdComponent) Objects() ([]client.Object, []client.Object) {
 		toDelete = append(toDelete, c.externalLinseedRoleBinding())
 	}
 
-	// Windows PSP does not support allowedHostPaths yet.
-	// See: https://github.com/kubernetes/kubernetes/issues/93165#issuecomment-693049808
-	if c.cfg.UsePSP && c.cfg.OSType == rmeta.OSTypeLinux {
-		objs = append(objs, c.fluentdPodSecurityPolicy())
+	objs = append(objs, c.fluentdServiceAccount())
+	if c.cfg.PacketCapture != nil {
+		objs = append(objs, c.packetCaptureApiRole(), c.packetCaptureApiRoleBinding())
 	}
 
-	objs = append(objs, c.fluentdServiceAccount())
-	objs = append(objs, c.packetCaptureApiRole(), c.packetCaptureApiRoleBinding())
 	objs = append(objs, c.daemonset())
 
 	return objs, toDelete
@@ -623,7 +616,7 @@ func (c *fluentdComponent) container() corev1.Container {
 		ImagePullPolicy: ImagePullPolicy(),
 		Env:             envs,
 		// On OpenShift Fluentd needs privileged access to access logs on host path volume
-		SecurityContext: c.securityContext(c.cfg.Installation.KubernetesProvider == operatorv1.ProviderOpenShift),
+		SecurityContext: c.securityContext(c.cfg.Installation.KubernetesProvider.IsOpenShift()),
 		VolumeMounts:    volumeMounts,
 		StartupProbe:    c.startup(),
 		LivenessProbe:   c.liveness(),
@@ -957,19 +950,6 @@ func (c *fluentdComponent) volumes() []corev1.Volume {
 	return volumes
 }
 
-func (c *fluentdComponent) fluentdPodSecurityPolicy() *policyv1beta1.PodSecurityPolicy {
-	psp := podsecuritypolicy.NewBasePolicy(c.fluentdName())
-	psp.Spec.Volumes = append(psp.Spec.Volumes, policyv1beta1.HostPath)
-	psp.Spec.AllowedHostPaths = []policyv1beta1.AllowedHostPath{
-		{
-			PathPrefix: c.path("/var/log/calico"),
-			ReadOnly:   false,
-		},
-	}
-	psp.Spec.RunAsUser.Rule = policyv1beta1.RunAsUserStrategyRunAsAny
-	return psp
-}
-
 func (c *fluentdComponent) fluentdClusterRoleBinding() *rbacv1.ClusterRoleBinding {
 	return &rbacv1.ClusterRoleBinding{
 		TypeMeta: metav1.TypeMeta{Kind: "ClusterRoleBinding", APIVersion: "rbac.authorization.k8s.io/v1"},
@@ -1017,21 +997,12 @@ func (c *fluentdComponent) fluentdClusterRole() *rbacv1.ClusterRole {
 		},
 	}
 
-	if c.cfg.UsePSP {
-		// Allow access to the pod security policy in case this is enforced on the cluster
-		role.Rules = append(role.Rules, rbacv1.PolicyRule{
-			APIGroups:     []string{"policy"},
-			Resources:     []string{"podsecuritypolicies"},
-			Verbs:         []string{"use"},
-			ResourceNames: []string{c.fluentdName()},
-		})
-	}
-	if c.cfg.Installation.KubernetesProvider == operatorv1.ProviderOpenShift {
+	if c.cfg.Installation.KubernetesProvider.IsOpenShift() {
 		role.Rules = append(role.Rules, rbacv1.PolicyRule{
 			APIGroups:     []string{"security.openshift.io"},
 			Resources:     []string{"securitycontextconstraints"},
 			Verbs:         []string{"use"},
-			ResourceNames: []string{PSSPrivileged},
+			ResourceNames: []string{securitycontextconstraints.Privileged},
 		})
 	}
 	return role
@@ -1225,12 +1196,6 @@ func (c *fluentdComponent) eksLogForwarderVolumes() []corev1.Volume {
 	return volumes
 }
 
-func (c *fluentdComponent) eksLogForwarderPodSecurityPolicy() *policyv1beta1.PodSecurityPolicy {
-	psp := podsecuritypolicy.NewBasePolicy(EKSLogForwarderName)
-	psp.Spec.RunAsUser.Rule = policyv1beta1.RunAsUserStrategyRunAsAny
-	return psp
-}
-
 func (c *fluentdComponent) eksLogForwarderClusterRoleBinding() *rbacv1.ClusterRoleBinding {
 	return &rbacv1.ClusterRoleBinding{
 		TypeMeta: metav1.TypeMeta{Kind: "ClusterRoleBinding", APIVersion: "rbac.authorization.k8s.io/v1"},
@@ -1253,7 +1218,6 @@ func (c *fluentdComponent) eksLogForwarderClusterRoleBinding() *rbacv1.ClusterRo
 }
 
 func (c *fluentdComponent) eksLogForwarderClusterRole() *rbacv1.ClusterRole {
-
 	rules := []rbacv1.PolicyRule{
 		{
 			// Add read access to Linseed APIs.
@@ -1270,17 +1234,7 @@ func (c *fluentdComponent) eksLogForwarderClusterRole() *rbacv1.ClusterRole {
 				"kube_auditlogs",
 			},
 			Verbs: []string{"create"},
-		}}
-
-	if c.cfg.UsePSP {
-		rules = append(rules, rbacv1.PolicyRule{
-
-			// Allow access to the pod security policy in case this is enforced on the cluster
-			APIGroups:     []string{"policy"},
-			Resources:     []string{"podsecuritypolicies"},
-			Verbs:         []string{"use"},
-			ResourceNames: []string{EKSLogForwarderName},
-		})
+		},
 	}
 
 	return &rbacv1.ClusterRole{
@@ -1290,7 +1244,6 @@ func (c *fluentdComponent) eksLogForwarderClusterRole() *rbacv1.ClusterRole {
 		},
 		Rules: rules,
 	}
-
 }
 
 func (c *fluentdComponent) allowTigeraPolicy() *v3.NetworkPolicy {
@@ -1327,7 +1280,7 @@ func (c *fluentdComponent) allowTigeraPolicy() *v3.NetworkPolicy {
 				NotPorts:          networkpolicy.Ports(8444),
 			},
 		})
-		egressRules = networkpolicy.AppendDNSEgressRules(egressRules, c.cfg.Installation.KubernetesProvider == operatorv1.ProviderOpenShift)
+		egressRules = networkpolicy.AppendDNSEgressRules(egressRules, c.cfg.Installation.KubernetesProvider.IsOpenShift())
 	}
 	egressRules = append(egressRules, v3.Rule{
 		Action: v3.Allow,

@@ -23,7 +23,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -38,20 +37,19 @@ import (
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
 	"github.com/tigera/operator/pkg/render/common/networkpolicy"
 	"github.com/tigera/operator/pkg/render/common/podaffinity"
-	"github.com/tigera/operator/pkg/render/common/podsecuritypolicy"
 	"github.com/tigera/operator/pkg/render/common/secret"
 	"github.com/tigera/operator/pkg/render/common/securitycontext"
+	"github.com/tigera/operator/pkg/render/common/securitycontextconstraints"
 	"github.com/tigera/operator/pkg/tls/certificatemanagement"
 )
 
 const (
-	DexNamespace             = "tigera-dex"
-	DexObjectName            = "tigera-dex"
-	DexPodSecurityPolicyName = "tigera-dex"
-	DexPort                  = 5556
-	DexTLSSecretName         = "tigera-dex-tls"
-	DexClientId              = "tigera-manager"
-	DexPolicyName            = networkpolicy.TigeraComponentPolicyPrefix + "allow-tigera-dex"
+	DexNamespace     = "tigera-dex"
+	DexObjectName    = "tigera-dex"
+	DexPort          = 5556
+	DexTLSSecretName = "tigera-dex-tls"
+	DexClientId      = "tigera-manager"
+	DexPolicyName    = networkpolicy.TigeraComponentPolicyPrefix + "allow-tigera-dex"
 )
 
 var DexEntityRule = networkpolicy.CreateEntityRule(DexNamespace, DexObjectName, DexPort)
@@ -66,16 +64,13 @@ func Dex(cfg *DexComponentConfiguration) Component {
 // DexComponentConfiguration contains all the config information needed to render the component.
 type DexComponentConfiguration struct {
 	PullSecrets   []*corev1.Secret
-	Openshift     bool
+	OpenShift     bool
 	Installation  *operatorv1.InstallationSpec
 	DexConfig     DexConfig
 	ClusterDomain string
 	DeleteDex     bool
 	TLSKeyPair    certificatemanagement.KeyPairInterface
 	TrustedBundle certificatemanagement.TrustedBundle
-
-	// Whether the cluster supports pod security policies.
-	UsePSP bool
 
 	Authentication *operatorv1.Authentication
 }
@@ -117,7 +112,9 @@ func (*dexComponent) SupportedOSType() rmeta.OSType {
 }
 
 func (c *dexComponent) Objects() ([]client.Object, []client.Object) {
+
 	objs := []client.Object{
+		CreateNamespace(DexObjectName, c.cfg.Installation.KubernetesProvider, PSSRestricted),
 		c.allowTigeraNetworkPolicy(),
 		networkpolicy.AllowTigeraDefaultDeny(DexNamespace),
 		c.serviceAccount(),
@@ -140,10 +137,6 @@ func (c *dexComponent) Objects() ([]client.Object, []client.Object) {
 
 	if c.cfg.Installation.CertificateManagement != nil {
 		objs = append(objs, certificatemanagement.CSRClusterRoleBinding(DexObjectName, DexNamespace))
-	}
-
-	if c.cfg.UsePSP {
-		objs = append(objs, c.podSecurityPolicy())
 	}
 
 	if c.cfg.DeleteDex {
@@ -178,12 +171,12 @@ func (c *dexComponent) clusterRole() client.Object {
 		},
 	}
 
-	if c.cfg.UsePSP {
+	if c.cfg.OpenShift {
 		rules = append(rules, rbacv1.PolicyRule{
-			APIGroups:     []string{"policy"},
-			Resources:     []string{"podsecuritypolicies"},
+			APIGroups:     []string{"security.openshift.io"},
+			Resources:     []string{"securitycontextconstraints"},
 			Verbs:         []string{"use"},
-			ResourceNames: []string{DexPodSecurityPolicyName},
+			ResourceNames: []string{securitycontextconstraints.NonRootV2},
 		})
 	}
 
@@ -215,10 +208,6 @@ func (c *dexComponent) clusterRoleBinding() client.Object {
 			},
 		},
 	}
-}
-
-func (c *dexComponent) podSecurityPolicy() *policyv1beta1.PodSecurityPolicy {
-	return podsecuritypolicy.NewBasePolicy(DexPodSecurityPolicyName)
 }
 
 func (c *dexComponent) deployment() client.Object {
@@ -401,7 +390,7 @@ func (c *dexComponent) configMap() *corev1.ConfigMap {
 
 func (c *dexComponent) allowTigeraNetworkPolicy() *v3.NetworkPolicy {
 	egressRules := []v3.Rule{}
-	egressRules = networkpolicy.AppendDNSEgressRules(egressRules, c.cfg.Openshift)
+	egressRules = networkpolicy.AppendDNSEgressRules(egressRules, c.cfg.OpenShift)
 	egressRules = append(egressRules, []v3.Rule{
 		{
 			Action:      v3.Allow,

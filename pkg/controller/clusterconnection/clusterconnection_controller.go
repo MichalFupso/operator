@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
+
 	operatorv1 "github.com/tigera/operator/api/v1"
 	"github.com/tigera/operator/pkg/common"
 	"github.com/tigera/operator/pkg/controller/certificatemanager"
@@ -120,7 +121,6 @@ func newReconciler(
 		status:         statusMgr,
 		clusterDomain:  opts.ClusterDomain,
 		tierWatchReady: tierWatchReady,
-		usePSP:         opts.UsePSP,
 	}
 	c.status.Run(opts.ShutdownContext)
 	return c
@@ -185,7 +185,6 @@ type ReconcileConnection struct {
 	status         status.StatusManager
 	clusterDomain  string
 	tierWatchReady *utils.ReadyFlag
-	usePSP         bool
 }
 
 // Reconcile reads that state of the cluster for a ManagementClusterConnection object and makes changes based on the
@@ -290,12 +289,13 @@ func (r *ReconcileConnection) Reconcile(ctx context.Context, request reconcile.R
 
 	secretsToTrust := []string{render.ProjectCalicoAPIServerTLSSecretName(instl.Variant)}
 
-	packetcaptureapi, err := utils.GetPacketCaptureAPI(ctx, r.Client)
-	if err != nil && !k8serrors.IsNotFound(err) {
-		r.status.SetDegraded(operatorv1.ResourceReadError, "Error querying PacketCapture CR", err, reqLogger)
+	// Add the packet capture certificate if it exists; otherwise, skip for now. The operator will reconcile the certificate once available.
+	s, err := utils.GetSecret(ctx, r.Client, render.PacketCaptureServerCert, common.OperatorNamespace())
+	if err != nil {
+		r.status.SetDegraded(operatorv1.ResourceReadError, "Error querying secret for PacketCapture certificate", err, reqLogger)
 		return reconcile.Result{}, err
 	}
-	if packetcaptureapi != nil {
+	if s != nil {
 		secretsToTrust = append(secretsToTrust, render.PacketCaptureServerCert)
 	}
 
@@ -368,11 +368,10 @@ func (r *ReconcileConnection) Reconcile(ctx context.Context, request reconcile.R
 		URL:                         managementClusterConnection.Spec.ManagementClusterAddr,
 		TunnelCAType:                managementClusterConnection.Spec.TLS.CA,
 		PullSecrets:                 pullSecrets,
-		Openshift:                   r.Provider == operatorv1.ProviderOpenShift,
+		OpenShift:                   r.Provider.IsOpenShift(),
 		Installation:                instl,
 		TunnelSecret:                tunnelSecret,
 		TrustedCertBundle:           trustedCertBundle,
-		UsePSP:                      r.usePSP,
 		ManagementClusterConnection: managementClusterConnection,
 	}
 

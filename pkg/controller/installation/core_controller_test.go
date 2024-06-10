@@ -60,7 +60,7 @@ import (
 	"github.com/tigera/operator/test"
 )
 
-var mismatchedError = fmt.Errorf("Installation spec.kubernetesProvider 'DockerEnterprise' does not match auto-detected value 'OpenShift'")
+var errMismatchedError = fmt.Errorf("installation spec.kubernetesProvider 'DockerEnterprise' does not match auto-detected value 'OpenShift'")
 
 type fakeNamespaceMigration struct{}
 
@@ -76,7 +76,7 @@ func (f *fakeNamespaceMigration) NeedCleanup() bool {
 	return false
 }
 
-func (f *fakeNamespaceMigration) CleanupMigration(ctx context.Context) error {
+func (f *fakeNamespaceMigration) CleanupMigration(ctx context.Context, log logr.Logger) error {
 	return nil
 }
 
@@ -104,7 +104,7 @@ var _ = Describe("Testing core-controller installation", func() {
 			}
 		},
 		table.Entry("Same detected/configured provider", operator.ProviderOpenShift, operator.ProviderOpenShift, nil),
-		table.Entry("Different detected/configured provider", operator.ProviderOpenShift, operator.ProviderDockerEE, mismatchedError),
+		table.Entry("Different detected/configured provider", operator.ProviderOpenShift, operator.ProviderDockerEE, errMismatchedError),
 		table.Entry("Same detected/configured managed provider", operator.ProviderEKS, operator.ProviderEKS, nil),
 	)
 

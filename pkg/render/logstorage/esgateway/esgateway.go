@@ -20,13 +20,13 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
+
 	operatorv1 "github.com/tigera/operator/api/v1"
 	"github.com/tigera/operator/pkg/components"
 	"github.com/tigera/operator/pkg/ptr"
@@ -35,9 +35,9 @@ import (
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
 	"github.com/tigera/operator/pkg/render/common/networkpolicy"
 	"github.com/tigera/operator/pkg/render/common/podaffinity"
-	"github.com/tigera/operator/pkg/render/common/podsecuritypolicy"
 	"github.com/tigera/operator/pkg/render/common/secret"
 	"github.com/tigera/operator/pkg/render/common/securitycontext"
+	"github.com/tigera/operator/pkg/render/common/securitycontextconstraints"
 	"github.com/tigera/operator/pkg/render/logstorage/esmetrics"
 	"github.com/tigera/operator/pkg/render/logstorage/kibana"
 	"github.com/tigera/operator/pkg/tls/certificatemanagement"
@@ -47,7 +47,6 @@ const (
 	DeploymentName        = "tigera-secure-es-gateway"
 	ServiceAccountName    = "tigera-secure-es-gateway"
 	RoleName              = "tigera-secure-es-gateway"
-	PodSecurityPolicyName = "tigera-esgateway"
 	ServiceName           = "tigera-secure-es-gateway-http"
 	PolicyName            = networkpolicy.TigeraComponentPolicyPrefix + "es-gateway-access"
 	ElasticsearchPortName = "es-gateway-elasticsearch-port"
@@ -82,9 +81,6 @@ type Config struct {
 	EsAdminUserName            string
 	Namespace                  string
 	TruthNamespace             string
-
-	// Whether the cluster supports pod security policies.
-	UsePSP bool
 }
 
 func (e *esGateway) ResolveImages(is *operatorv1.ImageSet) error {
@@ -124,9 +120,6 @@ func (e *esGateway) Objects() (toCreate, toDelete []client.Object) {
 	} else {
 		toCreate = append(toCreate, render.CreateCertificateSecret(e.cfg.ESGatewayKeyPair.GetCertificatePEM(), elasticsearch.PublicCertSecret, e.cfg.TruthNamespace))
 	}
-	if e.cfg.UsePSP {
-		toCreate = append(toCreate, e.esGatewayPodSecurityPolicy())
-	}
 	// Create the deployment last to ensure all secrets have been created
 	toCreate = append(toCreate, e.esGatewayDeployment())
 	return toCreate, toDelete
@@ -150,12 +143,12 @@ func (e *esGateway) esGatewayRole() *rbacv1.Role {
 		},
 	}
 
-	if e.cfg.UsePSP {
+	if e.cfg.Installation.KubernetesProvider.IsOpenShift() {
 		rules = append(rules, rbacv1.PolicyRule{
-			APIGroups:     []string{"policy"},
-			Resources:     []string{"podsecuritypolicies"},
+			APIGroups:     []string{"security.openshift.io"},
+			Resources:     []string{"securitycontextconstraints"},
 			Verbs:         []string{"use"},
-			ResourceNames: []string{PodSecurityPolicyName},
+			ResourceNames: []string{securitycontextconstraints.NonRootV2},
 		})
 	}
 
@@ -189,10 +182,6 @@ func (e *esGateway) esGatewayRoleBinding() *rbacv1.RoleBinding {
 			},
 		},
 	}
-}
-
-func (e *esGateway) esGatewayPodSecurityPolicy() *policyv1beta1.PodSecurityPolicy {
-	return podsecuritypolicy.NewBasePolicy(PodSecurityPolicyName)
 }
 
 func (e *esGateway) esGatewayDeployment() *appsv1.Deployment {
@@ -339,7 +328,7 @@ func (e *esGateway) esGatewayService() *corev1.Service {
 // Allow access to ES Gateway from components that need to talk to Elasticsearch or Kibana.
 func (e *esGateway) esGatewayAllowTigeraPolicy() *v3.NetworkPolicy {
 	egressRules := []v3.Rule{}
-	egressRules = networkpolicy.AppendDNSEgressRules(egressRules, e.cfg.Installation.KubernetesProvider == operatorv1.ProviderOpenShift)
+	egressRules = networkpolicy.AppendDNSEgressRules(egressRules, e.cfg.Installation.KubernetesProvider.IsOpenShift())
 	egressRules = append(egressRules, []v3.Rule{
 		{
 			Action:      v3.Allow,

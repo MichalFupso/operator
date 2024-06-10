@@ -27,7 +27,6 @@ import (
 	"github.com/tigera/operator/pkg/render/testutils"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,7 +48,6 @@ var _ = Describe("ECK rendering tests", func() {
 			&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "elastic-operator"}},
 			&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "elastic-operator"}},
 			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "elastic-operator", Namespace: eck.OperatorNamespace}},
-			&policyv1beta1.PodSecurityPolicy{ObjectMeta: metav1.ObjectMeta{Name: eck.OperatorName}},
 			&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: eck.OperatorName, Namespace: eck.OperatorNamespace}},
 		}
 
@@ -82,7 +80,6 @@ var _ = Describe("ECK rendering tests", func() {
 					{ObjectMeta: metav1.ObjectMeta{Name: "tigera-pull-secret"}},
 				},
 				Provider: operatorv1.ProviderNone,
-				UsePSP:   true,
 			}
 		})
 
@@ -221,12 +218,6 @@ var _ = Describe("ECK rendering tests", func() {
 					Resources: []string{"elasticsearchautoscalers", "elasticsearchautoscalers/status", "elasticsearchautoscalers/finalizers"},
 					Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 				},
-				{
-					APIGroups:     []string{"policy"},
-					Resources:     []string{"podsecuritypolicies"},
-					Verbs:         []string{"use"},
-					ResourceNames: []string{"elastic-operator"},
-				},
 			}))
 		})
 
@@ -238,7 +229,6 @@ var _ = Describe("ECK rendering tests", func() {
 				&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "elastic-operator"}},
 				&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "elastic-operator"}},
 				&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "elastic-operator", Namespace: eck.OperatorNamespace}},
-				&policyv1beta1.PodSecurityPolicy{ObjectMeta: metav1.ObjectMeta{Name: eck.OperatorName}},
 				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: eck.EnterpriseTrial, Namespace: eck.OperatorNamespace}},
 				&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: eck.OperatorName, Namespace: eck.OperatorNamespace}},
 			}
@@ -247,7 +237,21 @@ var _ = Describe("ECK rendering tests", func() {
 			component := eck.ECK(cfg)
 			createResources, _ := component.Objects()
 			rtest.ExpectResources(createResources, expectedResources)
+		})
 
+		It("should render SecurityContextConstrains properly when provider is OpenShift", func() {
+			cfg.Installation.KubernetesProvider = operatorv1.ProviderOpenShift
+			component := eck.ECK(cfg)
+			Expect(component.ResolveImages(nil)).To(BeNil())
+			resources, _ := component.Objects()
+
+			role := rtest.GetResource(resources, "elastic-operator", "", "rbac.authorization.k8s.io", "v1", "ClusterRole").(*rbacv1.ClusterRole)
+			Expect(role.Rules).To(ContainElement(rbacv1.PolicyRule{
+				APIGroups:     []string{"security.openshift.io"},
+				Resources:     []string{"securitycontextconstraints"},
+				Verbs:         []string{"use"},
+				ResourceNames: []string{"nonroot-v2"},
+			}))
 		})
 
 		Context("allow-tigera rendering", func() {
@@ -265,7 +269,7 @@ var _ = Describe("ECK rendering tests", func() {
 
 			DescribeTable("should render allow-tigera policy",
 				func(scenario testutils.AllowTigeraScenario) {
-					if scenario.Openshift {
+					if scenario.OpenShift {
 						cfg.Provider = operatorv1.ProviderOpenShift
 					} else {
 						cfg.Provider = operatorv1.ProviderNone
@@ -280,8 +284,8 @@ var _ = Describe("ECK rendering tests", func() {
 						Expect(policy).To(Equal(expectedPolicy))
 					}
 				},
-				Entry("for management/standalone, kube-dns", testutils.AllowTigeraScenario{ManagedCluster: false, Openshift: false}),
-				Entry("for management/standalone, openshift-dns", testutils.AllowTigeraScenario{ManagedCluster: false, Openshift: true}),
+				Entry("for management/standalone, kube-dns", testutils.AllowTigeraScenario{ManagedCluster: false, OpenShift: false}),
+				Entry("for management/standalone, openshift-dns", testutils.AllowTigeraScenario{ManagedCluster: false, OpenShift: true}),
 			)
 		})
 

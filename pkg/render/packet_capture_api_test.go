@@ -87,7 +87,7 @@ var _ = Describe("Rendering tests for PacketCapture API component", func() {
 			Installation:       &i,
 			KeyValidatorConfig: config,
 			ServerCertSecret:   secret,
-			UsePSP:             true,
+			OpenShift:          i.KubernetesProvider.IsOpenShift(),
 		}
 		pc := render.PacketCaptureAPI(cfg)
 		Expect(pc.ResolveImages(nil)).To(BeNil())
@@ -112,7 +112,6 @@ var _ = Describe("Rendering tests for PacketCapture API component", func() {
 			{name: render.PacketCaptureClusterRoleBindingName, ns: "", group: "rbac.authorization.k8s.io", version: "v1", kind: "ClusterRoleBinding"},
 			{name: render.PacketCaptureDeploymentName, ns: render.PacketCaptureNamespace, group: "apps", version: "v1", kind: "Deployment"},
 			{name: render.PacketCaptureServiceName, ns: render.PacketCaptureNamespace, group: "", version: "v1", kind: "Service"},
-			{name: "tigera-packetcapture", ns: "", group: "policy", version: "v1beta1", kind: "PodSecurityPolicy"},
 		}
 
 		return resources
@@ -327,12 +326,6 @@ var _ = Describe("Rendering tests for PacketCapture API component", func() {
 				Resources: []string{"packetcaptures/status"},
 				Verbs:     []string{"update"},
 			},
-			{
-				APIGroups:     []string{"policy"},
-				ResourceNames: []string{"tigera-packetcapture"},
-				Resources:     []string{"podsecuritypolicies"},
-				Verbs:         []string{"use"},
-			},
 		}))
 		clusterRoleBinding := rtest.GetResource(resources, render.PacketCaptureClusterRoleBindingName, "", "rbac.authorization.k8s.io", "v1", "ClusterRoleBinding").(*rbacv1.ClusterRoleBinding)
 		Expect(clusterRoleBinding.RoleRef.Name).To(Equal(render.PacketCaptureClusterRoleName))
@@ -379,6 +372,20 @@ var _ = Describe("Rendering tests for PacketCapture API component", func() {
 		Expect(deployment.Spec.Template.Spec.Tolerations).Should(ContainElements(append(rmeta.TolerateCriticalAddonsAndControlPlane, t)))
 	})
 
+	It("should render SecurityContextConstrains properly when provider is OpenShift", func() {
+		resources := renderPacketCapture(operatorv1.InstallationSpec{
+			KubernetesProvider: operatorv1.ProviderOpenShift,
+		}, nil)
+
+		role := rtest.GetResource(resources, "tigera-packetcapture", "", "rbac.authorization.k8s.io", "v1", "ClusterRole").(*rbacv1.ClusterRole)
+		Expect(role.Rules).To(ContainElement(rbacv1.PolicyRule{
+			APIGroups:     []string{"security.openshift.io"},
+			Resources:     []string{"securitycontextconstraints"},
+			Verbs:         []string{"use"},
+			ResourceNames: []string{"nonroot-v2"},
+		}))
+	})
+
 	It("should render all resources for an installation with certificate management", func() {
 		ca, _ := tls.MakeCA(rmeta.DefaultOperatorCASignerName())
 		cert, _, _ := ca.Config.GetPEMBytes() // create a valid pem block
@@ -418,7 +425,7 @@ var _ = Describe("Rendering tests for PacketCapture API component", func() {
 					Installation:     &defaultInstallation,
 					ServerCertSecret: secret,
 				}
-				cfg.Openshift = scenario.Openshift
+				cfg.OpenShift = scenario.OpenShift
 				if scenario.ManagedCluster {
 					cfg.ManagementClusterConnection = &operatorv1.ManagementClusterConnection{}
 				} else {
@@ -438,10 +445,10 @@ var _ = Describe("Rendering tests for PacketCapture API component", func() {
 				)
 				Expect(policy).To(Equal(expectedPolicy))
 			},
-			Entry("for management/standalone, kube-dns", testutils.AllowTigeraScenario{ManagedCluster: false, Openshift: false}),
-			Entry("for management/standalone, openshift-dns", testutils.AllowTigeraScenario{ManagedCluster: false, Openshift: true}),
-			Entry("for managed, kube-dns", testutils.AllowTigeraScenario{ManagedCluster: true, Openshift: false}),
-			Entry("for managed, openshift-dns", testutils.AllowTigeraScenario{ManagedCluster: true, Openshift: true}),
+			Entry("for management/standalone, kube-dns", testutils.AllowTigeraScenario{ManagedCluster: false, OpenShift: false}),
+			Entry("for management/standalone, openshift-dns", testutils.AllowTigeraScenario{ManagedCluster: false, OpenShift: true}),
+			Entry("for managed, kube-dns", testutils.AllowTigeraScenario{ManagedCluster: true, OpenShift: false}),
+			Entry("for managed, openshift-dns", testutils.AllowTigeraScenario{ManagedCluster: true, OpenShift: true}),
 		)
 	})
 
@@ -461,7 +468,6 @@ var _ = Describe("Rendering tests for PacketCapture API component", func() {
 				PullSecrets:      pullSecrets,
 				Installation:     &installation,
 				ServerCertSecret: secret,
-				UsePSP:           true,
 			}
 
 			pcResources := corev1.ResourceRequirements{

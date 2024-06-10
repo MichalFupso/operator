@@ -22,7 +22,6 @@ import (
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -81,7 +80,7 @@ var _ = Describe("Rendering tests", func() {
 			Installation:      &i,
 			TunnelSecret:      secret,
 			TrustedCertBundle: bundle,
-			Openshift:         openshift,
+			OpenShift:         openshift,
 		}
 	}
 
@@ -174,24 +173,19 @@ var _ = Describe("Rendering tests", func() {
 		})
 	})
 
-	It("should render PSP when flagged", func() {
-		cfg.Openshift = notOpenshift
-		cfg.UsePSP = true
+	It("should render SecurityContextConstrains properly when provider is OpenShift", func() {
+		cfg.Installation.KubernetesProvider = operatorv1.ProviderOpenShift
+		cfg.OpenShift = true
 		component := render.Guardian(cfg)
+		Expect(component.ResolveImages(nil)).To(BeNil())
 		resources, _ := component.Objects()
 
-		guardianPSP := rtest.GetResource(resources, render.GuardianPodSecurityPolicyName, "", "policy", "v1beta1", "PodSecurityPolicy").(*policyv1beta1.PodSecurityPolicy)
-		Expect(guardianPSP).ToNot(BeNil())
-		Expect(guardianPSP.Spec.Privileged).To(BeFalse())
-		Expect(*guardianPSP.Spec.AllowPrivilegeEscalation).To(BeFalse())
-		Expect(guardianPSP.Spec.RunAsUser.Rule).To(Equal(policyv1beta1.RunAsUserStrategyMustRunAsNonRoot))
-
-		clusterrole := rtest.GetResource(resources, render.GuardianClusterRoleName, "", "rbac.authorization.k8s.io", "v1", "ClusterRole").(*rbacv1.ClusterRole)
-		Expect(clusterrole.Rules).To(ContainElement(rbacv1.PolicyRule{
-			APIGroups:     []string{"policy"},
-			Resources:     []string{"podsecuritypolicies"},
+		role := rtest.GetResource(resources, "tigera-guardian", "", "rbac.authorization.k8s.io", "v1", "ClusterRole").(*rbacv1.ClusterRole)
+		Expect(role.Rules).To(ContainElement(rbacv1.PolicyRule{
+			APIGroups:     []string{"security.openshift.io"},
+			Resources:     []string{"securitycontextconstraints"},
 			Verbs:         []string{"use"},
-			ResourceNames: []string{render.GuardianPodSecurityPolicyName},
+			ResourceNames: []string{"nonroot-v2"},
 		}))
 	})
 
@@ -219,13 +213,13 @@ var _ = Describe("Rendering tests", func() {
 
 			DescribeTable("should render allow-tigera policy",
 				func(scenario testutils.AllowTigeraScenario) {
-					renderGuardianPolicy("127.0.0.1:1234", scenario.Openshift)
+					renderGuardianPolicy("127.0.0.1:1234", scenario.OpenShift)
 					policy := testutils.GetAllowTigeraPolicyFromResources(policyName, resources)
 					expectedPolicy := getExpectedPolicy(policyName, scenario)
 					Expect(policy).To(Equal(expectedPolicy))
 				},
-				Entry("for managed, kube-dns", testutils.AllowTigeraScenario{ManagedCluster: true, Openshift: false}),
-				Entry("for managed, openshift-dns", testutils.AllowTigeraScenario{ManagedCluster: true, Openshift: true}),
+				Entry("for managed, kube-dns", testutils.AllowTigeraScenario{ManagedCluster: true, OpenShift: false}),
+				Entry("for managed, openshift-dns", testutils.AllowTigeraScenario{ManagedCluster: true, OpenShift: true}),
 			)
 
 			// The test matrix above validates against an IP-based management cluster address.

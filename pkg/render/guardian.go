@@ -21,22 +21,22 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
+
 	"github.com/tigera/api/pkg/lib/numorstring"
 	operatorv1 "github.com/tigera/operator/api/v1"
 	"github.com/tigera/operator/pkg/components"
 	rcomponents "github.com/tigera/operator/pkg/render/common/components"
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
 	"github.com/tigera/operator/pkg/render/common/networkpolicy"
-	"github.com/tigera/operator/pkg/render/common/podsecuritypolicy"
 	"github.com/tigera/operator/pkg/render/common/secret"
 	"github.com/tigera/operator/pkg/render/common/securitycontext"
+	"github.com/tigera/operator/pkg/render/common/securitycontextconstraints"
 	"github.com/tigera/operator/pkg/tls/certificatemanagement"
 )
 
@@ -48,7 +48,6 @@ const (
 	GuardianClusterRoleName        = GuardianName
 	GuardianClusterRoleBindingName = GuardianName
 	GuardianDeploymentName         = GuardianName
-	GuardianPodSecurityPolicyName  = GuardianName
 	GuardianServiceName            = "tigera-guardian"
 	GuardianVolumeName             = "tigera-guardian-certs"
 	GuardianSecretName             = "tigera-managed-cluster-connection"
@@ -84,14 +83,12 @@ func GuardianPolicy(cfg *GuardianConfiguration) (Component, error) {
 type GuardianConfiguration struct {
 	URL               string
 	PullSecrets       []*corev1.Secret
-	Openshift         bool
+	OpenShift         bool
 	Installation      *operatorv1.InstallationSpec
 	TunnelSecret      *corev1.Secret
 	TrustedCertBundle certificatemanagement.TrustedBundle
 	TunnelCAType      operatorv1.CAType
 
-	// Whether the cluster supports pod security policies.
-	UsePSP                      bool
 	ManagementClusterConnection *operatorv1.ManagementClusterConnection
 }
 
@@ -132,7 +129,7 @@ func (c *GuardianComponent) Objects() ([]client.Object, []client.Object) {
 		// service account is always within the tigera-manager namespace - regardless of (multi)tenancy mode.
 		CreateNamespace(ManagerNamespace, c.cfg.Installation.KubernetesProvider, PSSRestricted),
 		managerServiceAccount(ManagerNamespace),
-		managerClusterRole(false, true, c.cfg.UsePSP, c.cfg.Installation.KubernetesProvider),
+		managerClusterRole(true, c.cfg.Installation.KubernetesProvider, nil),
 		managerClusterRoleBinding([]string{ManagerNamespace}),
 
 		// Install default UI settings for this managed cluster.
@@ -142,9 +139,6 @@ func (c *GuardianComponent) Objects() ([]client.Object, []client.Object) {
 		managerClusterWideDefaultView(),
 	)
 
-	if c.cfg.UsePSP {
-		objs = append(objs, c.podSecurityPolicy())
-	}
 	return objs, nil
 }
 
@@ -202,10 +196,6 @@ func (c *GuardianComponent) serviceAccount() *corev1.ServiceAccount {
 	}
 }
 
-func (c *GuardianComponent) podSecurityPolicy() *policyv1beta1.PodSecurityPolicy {
-	return podsecuritypolicy.NewBasePolicy(GuardianPodSecurityPolicyName)
-}
-
 func (c *GuardianComponent) clusterRole() *rbacv1.ClusterRole {
 	policyRules := []rbacv1.PolicyRule{
 		{
@@ -215,13 +205,12 @@ func (c *GuardianComponent) clusterRole() *rbacv1.ClusterRole {
 		},
 	}
 
-	if c.cfg.UsePSP {
-		// Allow access to the pod security policy in case this is enforced on the cluster
+	if c.cfg.OpenShift {
 		policyRules = append(policyRules, rbacv1.PolicyRule{
-			APIGroups:     []string{"policy"},
-			Resources:     []string{"podsecuritypolicies"},
+			APIGroups:     []string{"security.openshift.io"},
+			Resources:     []string{"securitycontextconstraints"},
 			Verbs:         []string{"use"},
-			ResourceNames: []string{GuardianPodSecurityPolicyName},
+			ResourceNames: []string{securitycontextconstraints.NonRootV2},
 		})
 	}
 
@@ -370,7 +359,7 @@ func guardianAllowTigeraPolicy(cfg *GuardianConfiguration) (*v3.NetworkPolicy, e
 			Destination: PacketCaptureEntityRule,
 		},
 	}
-	egressRules = networkpolicy.AppendDNSEgressRules(egressRules, cfg.Openshift)
+	egressRules = networkpolicy.AppendDNSEgressRules(egressRules, cfg.OpenShift)
 	egressRules = append(egressRules, []v3.Rule{
 		{
 			Action:      v3.Allow,

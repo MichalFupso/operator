@@ -107,7 +107,6 @@ func newReconciler(mgr manager.Manager, opts options.AddOptions, licenseAPIReady
 		clusterDomain:   opts.ClusterDomain,
 		licenseAPIReady: licenseAPIReady,
 		tierWatchReady:  tierWatchReady,
-		usePSP:          opts.UsePSP,
 		multiTenant:     opts.MultiTenant,
 		externalElastic: opts.ElasticExternal,
 	}
@@ -183,7 +182,6 @@ type ReconcileLogCollector struct {
 	clusterDomain   string
 	licenseAPIReady *utils.ReadyFlag
 	tierWatchReady  *utils.ReadyFlag
-	usePSP          bool
 	multiTenant     bool
 	externalElastic bool
 }
@@ -534,7 +532,7 @@ func (r *ReconcileLogCollector) Reconcile(ctx context.Context, request reconcile
 	var eksConfig *render.EksCloudwatchLogConfig
 	var esClusterConfig *relasticsearch.ClusterConfig
 	var eksLogForwarderKeyPair certificatemanagement.KeyPairInterface
-	if installation.KubernetesProvider == operatorv1.ProviderEKS {
+	if installation.KubernetesProvider.IsEKS() {
 		log.Info("Managed kubernetes EKS found, getting necessary credentials and config")
 		if instance.Spec.AdditionalSources != nil {
 			if instance.Spec.AdditionalSources.EksCloudwatchLog != nil {
@@ -567,6 +565,12 @@ func (r *ReconcileLogCollector) Reconcile(ctx context.Context, request reconcile
 		}
 	}
 
+	packetcaptureapi, err := utils.GetPacketCaptureAPI(ctx, r.client)
+	if err != nil && !errors.IsNotFound(err) {
+		r.status.SetDegraded(operatorv1.ResourceReadError, "Error querying PacketCapture CR", err, reqLogger)
+		return reconcile.Result{}, err
+	}
+
 	// Create a component handler to manage the rendered component.
 	handler := utils.NewComponentHandler(log, r.client, r.scheme, instance)
 
@@ -584,11 +588,11 @@ func (r *ReconcileLogCollector) Reconcile(ctx context.Context, request reconcile
 		FluentdKeyPair:         fluentdKeyPair,
 		TrustedBundle:          trustedBundle,
 		ManagedCluster:         managedCluster,
-		UsePSP:                 r.usePSP,
 		UseSyslogCertificate:   useSyslogCertificate,
 		Tenant:                 tenant,
 		ExternalElastic:        r.externalElastic,
 		EKSLogForwarderKeyPair: eksLogForwarderKeyPair,
+		PacketCapture:          packetcaptureapi,
 	}
 	// Render the fluentd component for Linux
 	comp := render.Fluentd(fluentdCfg)
@@ -602,7 +606,7 @@ func (r *ReconcileLogCollector) Reconcile(ctx context.Context, request reconcile
 		TrustedBundle: trustedBundle,
 	}
 
-	if installation.KubernetesProvider == operatorv1.ProviderEKS {
+	if installation.KubernetesProvider.IsEKS() {
 		if instance.Spec.AdditionalSources != nil {
 			if instance.Spec.AdditionalSources.EksCloudwatchLog != nil {
 				certificateComponent.ServiceAccounts = append(certificateComponent.ServiceAccounts, render.EKSLogForwarderName)
@@ -648,7 +652,6 @@ func (r *ReconcileLogCollector) Reconcile(ctx context.Context, request reconcile
 			OSType:                 rmeta.OSTypeWindows,
 			TrustedBundle:          trustedBundle,
 			ManagedCluster:         managedCluster,
-			UsePSP:                 r.usePSP,
 			UseSyslogCertificate:   useSyslogCertificate,
 			FluentdKeyPair:         fluentdKeyPair,
 			EKSLogForwarderKeyPair: eksLogForwarderKeyPair,

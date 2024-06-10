@@ -106,7 +106,6 @@ func newReconciler(mgr manager.Manager, opts options.AddOptions, tierWatchReady 
 		status:         status.New(mgr.GetClient(), "authentication", opts.KubernetesVersion),
 		clusterDomain:  opts.ClusterDomain,
 		tierWatchReady: tierWatchReady,
-		usePSP:         opts.UsePSP,
 		multiTenant:    opts.MultiTenant,
 	}
 	r.status.Run(opts.ShutdownContext)
@@ -163,7 +162,6 @@ type ReconcileAuthentication struct {
 	status         status.StatusManager
 	clusterDomain  string
 	tierWatchReady *utils.ReadyFlag
-	usePSP         bool
 	multiTenant    bool
 }
 
@@ -234,17 +232,6 @@ func (r *ReconcileAuthentication) Reconcile(ctx context.Context, request reconci
 	if variant != oprv1.TigeraSecureEnterprise {
 		r.status.SetDegraded(oprv1.ResourceNotReady, fmt.Sprintf("Waiting for network to be %s", oprv1.TigeraSecureEnterprise), nil, reqLogger)
 		return reconcile.Result{}, nil
-	}
-
-	// Make sure the tigera-dex namespace exists, before rendering any objects there.
-	if err := r.client.Get(ctx, client.ObjectKey{Name: render.DexObjectName}, &corev1.Namespace{}); err != nil {
-		if errors.IsNotFound(err) {
-			r.status.SetDegraded(oprv1.ResourceNotFound, "Waiting for namespace tigera-dex to be created", err, reqLogger)
-			return reconcile.Result{}, nil
-		} else {
-			r.status.SetDegraded(oprv1.ResourceReadError, "Error querying tigera-dex namespace", err, reqLogger)
-			return reconcile.Result{}, err
-		}
 	}
 
 	// Validate that the tier watch is ready before querying the tier to ensure we utilize the cache.
@@ -329,14 +316,13 @@ func (r *ReconcileAuthentication) Reconcile(ctx context.Context, request reconci
 
 	dexComponentCfg := &render.DexComponentConfiguration{
 		PullSecrets:    pullSecrets,
-		Openshift:      r.provider == oprv1.ProviderOpenShift,
+		OpenShift:      r.provider.IsOpenShift(),
 		Installation:   install,
 		DexConfig:      dexCfg,
 		ClusterDomain:  r.clusterDomain,
 		DeleteDex:      disableDex,
 		TLSKeyPair:     tlsKeyPair,
 		TrustedBundle:  trustedBundle,
-		UsePSP:         r.usePSP,
 		Authentication: authentication,
 	}
 
@@ -349,16 +335,19 @@ func (r *ReconcileAuthentication) Reconcile(ctx context.Context, request reconci
 		return reconcile.Result{}, err
 	}
 
-	components := []render.Component{
-		component,
-		rcertificatemanagement.CertificateManagement(&rcertificatemanagement.Config{
-			Namespace:       render.DexNamespace,
-			ServiceAccounts: []string{render.DexObjectName},
-			KeyPairOptions: []rcertificatemanagement.KeyPairOption{
-				rcertificatemanagement.NewKeyPairOption(tlsKeyPair, true, true),
-			},
-			TrustedBundle: trustedBundle,
-		}),
+	components := []render.Component{component}
+
+	if !disableDex {
+		components = append(components,
+			rcertificatemanagement.CertificateManagement(&rcertificatemanagement.Config{
+				Namespace:       render.DexNamespace,
+				ServiceAccounts: []string{render.DexObjectName},
+				KeyPairOptions: []rcertificatemanagement.KeyPairOption{
+					rcertificatemanagement.NewKeyPairOption(tlsKeyPair, true, true),
+				},
+				TrustedBundle: trustedBundle,
+			}),
+		)
 	}
 
 	for _, comp := range components {

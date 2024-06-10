@@ -19,34 +19,32 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/tigera/operator/pkg/common"
-	"k8s.io/apiserver/pkg/authentication/serviceaccount"
-
-	relasticsearch "github.com/tigera/operator/pkg/render/common/elasticsearch"
-	"github.com/tigera/operator/pkg/url"
-
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apiserver/pkg/authentication/serviceaccount"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
+
 	operatorv1 "github.com/tigera/operator/api/v1"
+	"github.com/tigera/operator/pkg/common"
 	"github.com/tigera/operator/pkg/components"
 	"github.com/tigera/operator/pkg/controller/k8sapi"
 	"github.com/tigera/operator/pkg/ptr"
 	"github.com/tigera/operator/pkg/render"
 	rcomp "github.com/tigera/operator/pkg/render/common/components"
+	relasticsearch "github.com/tigera/operator/pkg/render/common/elasticsearch"
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
 	"github.com/tigera/operator/pkg/render/common/networkpolicy"
-	"github.com/tigera/operator/pkg/render/common/podsecuritypolicy"
 	"github.com/tigera/operator/pkg/render/common/secret"
 	"github.com/tigera/operator/pkg/render/common/securitycontext"
+	"github.com/tigera/operator/pkg/render/common/securitycontextconstraints"
 	"github.com/tigera/operator/pkg/render/monitor"
 	"github.com/tigera/operator/pkg/tls/certificatemanagement"
+	"github.com/tigera/operator/pkg/url"
 )
 
 const (
@@ -54,14 +52,12 @@ const (
 	KubeControllerServiceAccount    = "calico-kube-controllers"
 	KubeControllerRole              = "calico-kube-controllers"
 	KubeControllerRoleBinding       = "calico-kube-controllers"
-	KubeControllerPodSecurityPolicy = "calico-kube-controllers"
 	KubeControllerMetrics           = "calico-kube-controllers-metrics"
 	KubeControllerNetworkPolicyName = networkpolicy.TigeraComponentPolicyPrefix + "kube-controller-access"
 
 	EsKubeController                     = "es-calico-kube-controllers"
 	EsKubeControllerRole                 = "es-calico-kube-controllers"
 	EsKubeControllerRoleBinding          = "es-calico-kube-controllers"
-	EsKubeControllerPodSecurityPolicy    = "es-calico-kube-controllers"
 	EsKubeControllerMetrics              = "es-calico-kube-controllers-metrics"
 	EsKubeControllerNetworkPolicyName    = networkpolicy.TigeraComponentPolicyPrefix + "es-kube-controller-access"
 	MultiTenantManagedClustersAccessName = "es-calico-kube-controllers-managed-cluster-access"
@@ -96,8 +92,6 @@ type KubeControllersConfiguration struct {
 	KubeControllersGatewaySecret *corev1.Secret
 	TrustedBundle                certificatemanagement.TrustedBundleRO
 
-	// Whether the cluster supports pod security policies.
-	UsePSP           bool
 	MetricsServerTLS certificatemanagement.KeyPairInterface
 
 	// Namespace to be installed into.
@@ -301,17 +295,13 @@ func (c *kubeControllersComponent) Objects() ([]client.Object, []client.Object) 
 		c.controllersDeployment(),
 	)
 
-	if c.cfg.Installation.KubernetesProvider == operatorv1.ProviderOpenShift {
+	if c.cfg.Installation.KubernetesProvider.IsOpenShift() {
 		objectsToCreate = append(objectsToCreate, c.controllersOCPFederationRoleBinding())
 	}
 	objectsToDelete := []client.Object{}
 	if c.cfg.KubeControllersGatewaySecret != nil {
 		objectsToCreate = append(objectsToCreate, secret.ToRuntimeObjects(
 			secret.CopyToNamespace(c.cfg.Namespace, c.cfg.KubeControllersGatewaySecret)...)...)
-	}
-
-	if c.cfg.UsePSP {
-		objectsToCreate = append(objectsToCreate, c.controllersPodSecurityPolicy())
 	}
 
 	if c.cfg.MetricsPort != 0 {
@@ -430,13 +420,12 @@ func kubeControllersRoleCommonRules(cfg *KubeControllersConfiguration, kubeContr
 		},
 	}
 
-	if cfg.UsePSP {
-		// Allow access to the pod security policy in case this is enforced on the cluster
+	if cfg.Installation.KubernetesProvider.IsOpenShift() {
 		rules = append(rules, rbacv1.PolicyRule{
-			APIGroups:     []string{"policy"},
-			Resources:     []string{"podsecuritypolicies"},
+			APIGroups:     []string{"security.openshift.io"},
+			Resources:     []string{"securitycontextconstraints"},
 			Verbs:         []string{"use"},
-			ResourceNames: []string{kubeControllerName},
+			ResourceNames: []string{securitycontextconstraints.NonRootV2},
 		})
 	}
 
@@ -775,10 +764,6 @@ func (c *kubeControllersComponent) annotations() map[string]string {
 	return am
 }
 
-func (c *kubeControllersComponent) controllersPodSecurityPolicy() *policyv1beta1.PodSecurityPolicy {
-	return podsecuritypolicy.NewBasePolicy(c.kubeControllerName)
-}
-
 func (c *kubeControllersComponent) kubeControllersVolumeMounts() []corev1.VolumeMount {
 	var mounts []corev1.VolumeMount
 	if c.cfg.TrustedBundle != nil {
@@ -803,7 +788,7 @@ func (c *kubeControllersComponent) kubeControllersVolumes() []corev1.Volume {
 
 func kubeControllersAllowTigeraPolicy(cfg *KubeControllersConfiguration) *v3.NetworkPolicy {
 	egressRules := []v3.Rule{}
-	egressRules = networkpolicy.AppendDNSEgressRules(egressRules, cfg.Installation.KubernetesProvider == operatorv1.ProviderOpenShift)
+	egressRules = networkpolicy.AppendDNSEgressRules(egressRules, cfg.Installation.KubernetesProvider.IsOpenShift())
 	egressRules = append(egressRules, []v3.Rule{
 		{
 			Action:   v3.Allow,
@@ -863,7 +848,7 @@ func esKubeControllersAllowTigeraPolicy(cfg *KubeControllersConfiguration) *v3.N
 	}
 
 	egressRules := []v3.Rule{}
-	egressRules = networkpolicy.AppendDNSEgressRules(egressRules, cfg.Installation.KubernetesProvider == operatorv1.ProviderOpenShift)
+	egressRules = networkpolicy.AppendDNSEgressRules(egressRules, cfg.Installation.KubernetesProvider.IsOpenShift())
 	egressRules = append(egressRules, []v3.Rule{
 		{
 			Action:   v3.Allow,

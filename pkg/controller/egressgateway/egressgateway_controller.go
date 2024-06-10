@@ -23,18 +23,6 @@ import (
 	"github.com/go-logr/logr"
 	ocsv1 "github.com/openshift/api/security/v1"
 
-	operatorv1 "github.com/tigera/operator/api/v1"
-	crdv1 "github.com/tigera/operator/pkg/apis/crd.projectcalico.org/v1"
-	"github.com/tigera/operator/pkg/components"
-	"github.com/tigera/operator/pkg/controller/options"
-	"github.com/tigera/operator/pkg/controller/status"
-	"github.com/tigera/operator/pkg/controller/utils"
-	"github.com/tigera/operator/pkg/controller/utils/imageset"
-	"github.com/tigera/operator/pkg/ctrlruntime"
-	"github.com/tigera/operator/pkg/render"
-	rmeta "github.com/tigera/operator/pkg/render/common/meta"
-	"github.com/tigera/operator/pkg/render/egressgateway"
-
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,6 +35,19 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	operatorv1 "github.com/tigera/operator/api/v1"
+
+	crdv1 "github.com/tigera/operator/pkg/apis/crd.projectcalico.org/v1"
+	"github.com/tigera/operator/pkg/components"
+	"github.com/tigera/operator/pkg/controller/options"
+	"github.com/tigera/operator/pkg/controller/status"
+	"github.com/tigera/operator/pkg/controller/utils"
+	"github.com/tigera/operator/pkg/controller/utils/imageset"
+	"github.com/tigera/operator/pkg/ctrlruntime"
+	"github.com/tigera/operator/pkg/render"
+	rmeta "github.com/tigera/operator/pkg/render/common/meta"
+	"github.com/tigera/operator/pkg/render/egressgateway"
 )
 
 const (
@@ -91,7 +92,6 @@ func newReconciler(mgr manager.Manager, opts options.AddOptions, licenseAPIReady
 		status:          status.New(mgr.GetClient(), "egressgateway", opts.KubernetesVersion),
 		clusterDomain:   opts.ClusterDomain,
 		licenseAPIReady: licenseAPIReady,
-		usePSP:          opts.UsePSP,
 	}
 	r.status.Run(opts.ShutdownContext)
 	return r
@@ -141,7 +141,6 @@ type ReconcileEgressGateway struct {
 	status          status.StatusManager
 	clusterDomain   string
 	licenseAPIReady *utils.ReadyFlag
-	usePSP          bool
 }
 
 // Reconcile reads that state of the cluster for an EgressGateway object and makes changes
@@ -162,11 +161,8 @@ func (r *ReconcileEgressGateway) Reconcile(ctx context.Context, request reconcil
 	ch := utils.NewComponentHandler(log, r.client, r.scheme, nil)
 	if len(egws) == 0 {
 		var objects []client.Object
-		if r.provider == operatorv1.ProviderOpenShift {
+		if r.provider.IsOpenShift() {
 			objects = append(objects, egressgateway.SecurityContextConstraints())
-		}
-		if r.usePSP {
-			objects = append(objects, egressgateway.PodSecurityPolicy())
 		}
 		err := ch.CreateOrUpdateOrDelete(ctx, render.NewDeletionPassthrough(objects...), r.status)
 		if err != nil {
@@ -204,7 +200,7 @@ func (r *ReconcileEgressGateway) Reconcile(ctx context.Context, request reconcil
 			// In the case of OpenShift, we are using a single SCC.
 			// Whenever a EGW resource is deleted, remove the corresponding user from the SCC
 			// and update the resource.
-			if r.provider == operatorv1.ProviderOpenShift {
+			if r.provider.IsOpenShift() {
 				scc, err := getOpenShiftSCC(ctx, r.client)
 				if err != nil {
 					reqLogger.Error(err, "Error querying SecurityContextConstraints")
@@ -397,7 +393,6 @@ func (r *ReconcileEgressGateway) reconcileEgressGateway(ctx context.Context, egw
 		}
 	}
 
-	openshift := r.provider == operatorv1.ProviderOpenShift
 	config := &egressgateway.Config{
 		PullSecrets:       pullSecrets,
 		Installation:      installation,
@@ -406,8 +401,7 @@ func (r *ReconcileEgressGateway) reconcileEgressGateway(ctx context.Context, egw
 		VXLANPort:         egwVXLANPort,
 		VXLANVNI:          egwVXLANVNI,
 		IptablesBackend:   ipTablesBackend,
-		UsePSP:            r.usePSP,
-		OpenShift:         openshift,
+		OpenShift:         r.provider.IsOpenShift(),
 		NamespaceAndNames: namespaceAndNames,
 	}
 

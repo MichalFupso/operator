@@ -101,7 +101,6 @@ var _ = Describe("monitor rendering tests", func() {
 			AlertmanagerConfigSecret: defaultAlertmanagerConfigSecret,
 			ClusterDomain:            "example.org",
 			TrustedCertBundle:        bundle,
-			UsePSP:                   true,
 		}
 	})
 
@@ -204,7 +203,7 @@ var _ = Describe("monitor rendering tests", func() {
 		Expect(ok).To(BeTrue())
 		promOperClusterRoleObj, ok := rtest.GetResource(toCreate, "calico-prometheus-operator", "", "rbac.authorization.k8s.io", "v1", "ClusterRole").(*rbacv1.ClusterRole)
 		Expect(ok).To(BeTrue())
-		Expect(promOperClusterRoleObj.Rules).To(HaveLen(11))
+		Expect(promOperClusterRoleObj.Rules).To(HaveLen(10))
 		Expect(promOperClusterRoleObj.Rules[0]).To(Equal(rbacv1.PolicyRule{
 			APIGroups: []string{"monitoring.coreos.com"},
 			Resources: []string{
@@ -305,12 +304,6 @@ var _ = Describe("monitor rendering tests", func() {
 				"get",
 			},
 		}))
-		Expect(promOperClusterRoleObj.Rules[10]).To(Equal(rbacv1.PolicyRule{
-			APIGroups:     []string{"policy"},
-			Resources:     []string{"podsecuritypolicies"},
-			Verbs:         []string{"use"},
-			ResourceNames: []string{"tigera-prometheus"},
-		}))
 		promOperClusterRoleBindingObj, ok := rtest.GetResource(toCreate, "calico-prometheus-operator", "", "rbac.authorization.k8s.io", "v1", "ClusterRoleBinding").(*rbacv1.ClusterRoleBinding)
 		Expect(ok).To(BeTrue())
 		Expect(promOperClusterRoleBindingObj.Subjects).To(HaveLen(1))
@@ -405,7 +398,7 @@ var _ = Describe("monitor rendering tests", func() {
 		// Prometheus ClusterRole
 		prometheusClusterRoleObj, ok := rtest.GetResource(toCreate, "prometheus", "", "rbac.authorization.k8s.io", "v1", "ClusterRole").(*rbacv1.ClusterRole)
 		Expect(ok).To(BeTrue())
-		Expect(prometheusClusterRoleObj.Rules).To(HaveLen(5))
+		Expect(prometheusClusterRoleObj.Rules).To(HaveLen(4))
 		Expect(prometheusClusterRoleObj.Rules[0].APIGroups).To(HaveLen(1))
 		Expect(prometheusClusterRoleObj.Rules[0].APIGroups[0]).To(Equal(""))
 		Expect(prometheusClusterRoleObj.Rules[0].Resources).To(HaveLen(4))
@@ -439,14 +432,6 @@ var _ = Describe("monitor rendering tests", func() {
 		Expect(prometheusClusterRoleObj.Rules[3].NonResourceURLs[0]).To(Equal("/metrics"))
 		Expect(prometheusClusterRoleObj.Rules[3].Verbs).To(HaveLen(1))
 		Expect(prometheusClusterRoleObj.Rules[3].Verbs[0]).To(Equal("get"))
-		Expect(prometheusClusterRoleObj.Rules[4].APIGroups).To(HaveLen(1))
-		Expect(prometheusClusterRoleObj.Rules[4].APIGroups[0]).To(Equal("policy"))
-		Expect(prometheusClusterRoleObj.Rules[4].Resources).To(HaveLen(1))
-		Expect(prometheusClusterRoleObj.Rules[4].Resources[0]).To(Equal("podsecuritypolicies"))
-		Expect(prometheusClusterRoleObj.Rules[4].ResourceNames).To(HaveLen(1))
-		Expect(prometheusClusterRoleObj.Rules[4].ResourceNames[0]).To(Equal("tigera-prometheus"))
-		Expect(prometheusClusterRoleObj.Rules[4].Verbs).To(HaveLen(1))
-		Expect(prometheusClusterRoleObj.Rules[4].Verbs[0]).To(Equal("use"))
 
 		// Prometheus ClusterRoleBinding
 		prometheusClusterRolebindingObj, ok := rtest.GetResource(toCreate, "prometheus", "", "rbac.authorization.k8s.io", "v1", "ClusterRoleBinding").(*rbacv1.ClusterRoleBinding)
@@ -616,16 +601,36 @@ var _ = Describe("monitor rendering tests", func() {
 		Expect(rolebindingObj.Subjects[0].Namespace).To(Equal(common.OperatorNamespace()))
 	})
 
-	It("should render properly when PSP is not supported by the cluster", func() {
-		cfg.UsePSP = false
+	It("should render SecurityContextConstrains properly when provider is OpenShift", func() {
+		cfg.Installation.KubernetesProvider = operatorv1.ProviderOpenShift
+		cfg.OpenShift = true
 		component := monitor.Monitor(cfg)
 		Expect(component.ResolveImages(nil)).To(BeNil())
 		resources, _ := component.Objects()
 
-		// Should not contain any PodSecurityPolicies
-		for _, r := range resources {
-			Expect(r.GetObjectKind().GroupVersionKind().Kind).NotTo(Equal("PodSecurityPolicy"))
-		}
+		role := rtest.GetResource(resources, "calico-prometheus-operator", "", "rbac.authorization.k8s.io", "v1", "ClusterRole").(*rbacv1.ClusterRole)
+		Expect(role.Rules).To(ContainElement(rbacv1.PolicyRule{
+			APIGroups:     []string{"security.openshift.io"},
+			Resources:     []string{"securitycontextconstraints"},
+			Verbs:         []string{"use"},
+			ResourceNames: []string{"nonroot-v2"},
+		}))
+
+		role = rtest.GetResource(resources, "prometheus", "", "rbac.authorization.k8s.io", "v1", "ClusterRole").(*rbacv1.ClusterRole)
+		Expect(role.Rules).To(ContainElement(rbacv1.PolicyRule{
+			APIGroups:     []string{"security.openshift.io"},
+			Resources:     []string{"securitycontextconstraints"},
+			Verbs:         []string{"use"},
+			ResourceNames: []string{"nonroot-v2"},
+		}))
+
+		role = rtest.GetResource(resources, "tigera-prometheus", "", "rbac.authorization.k8s.io", "v1", "ClusterRole").(*rbacv1.ClusterRole)
+		Expect(role.Rules).To(ContainElement(rbacv1.PolicyRule{
+			APIGroups:     []string{"security.openshift.io"},
+			Resources:     []string{"securitycontextconstraints"},
+			Verbs:         []string{"use"},
+			ResourceNames: []string{"nonroot-v2"},
+		}))
 	})
 
 	It("Should render Prometheus resources when Dex is enabled", func() {
@@ -786,7 +791,7 @@ var _ = Describe("monitor rendering tests", func() {
 
 		DescribeTable("should render allow-tigera policy",
 			func(scenario testutils.AllowTigeraScenario) {
-				cfg.Openshift = scenario.Openshift
+				cfg.OpenShift = scenario.OpenShift
 				cfg.KubeControllerPort = 9094
 
 				component := monitor.MonitorPolicy(cfg)
@@ -798,10 +803,10 @@ var _ = Describe("monitor rendering tests", func() {
 					Expect(policy).To(Equal(expectedPolicy))
 				}
 			},
-			Entry("for management/standalone, kube-dns", testutils.AllowTigeraScenario{ManagedCluster: false, Openshift: false}),
-			Entry("for management/standalone, openshift-dns", testutils.AllowTigeraScenario{ManagedCluster: false, Openshift: true}),
-			Entry("for managed, kube-dns", testutils.AllowTigeraScenario{ManagedCluster: true, Openshift: false}),
-			Entry("for managed, openshift-dns", testutils.AllowTigeraScenario{ManagedCluster: true, Openshift: true}),
+			Entry("for management/standalone, kube-dns", testutils.AllowTigeraScenario{ManagedCluster: false, OpenShift: false}),
+			Entry("for management/standalone, openshift-dns", testutils.AllowTigeraScenario{ManagedCluster: false, OpenShift: true}),
+			Entry("for managed, kube-dns", testutils.AllowTigeraScenario{ManagedCluster: true, OpenShift: false}),
+			Entry("for managed, openshift-dns", testutils.AllowTigeraScenario{ManagedCluster: true, OpenShift: true}),
 		)
 
 		It("prometheus policy should omit kube-controller egress rule when kube-controller port is 0", func() {
@@ -983,6 +988,5 @@ func expectedBaseResources() []resource {
 		{"fluentd-metrics", common.TigeraPrometheusNamespace, "monitoring.coreos.com", "v1", monitoringv1.ServiceMonitorsKind},
 		{"tigera-api", common.TigeraPrometheusNamespace, "monitoring.coreos.com", "v1", monitoringv1.ServiceMonitorsKind},
 		{"calico-kube-controllers-metrics", common.TigeraPrometheusNamespace, "monitoring.coreos.com", "v1", monitoringv1.ServiceMonitorsKind},
-		{"tigera-prometheus", "", "policy", "v1beta1", "PodSecurityPolicy"},
 	}
 }

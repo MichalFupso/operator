@@ -19,14 +19,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/tigera/operator/pkg/ptr"
-
-	relasticsearch "github.com/tigera/operator/pkg/render/common/elasticsearch"
-	"github.com/tigera/operator/pkg/render/logstorage"
-
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -34,17 +28,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
+
 	operatorv1 "github.com/tigera/operator/api/v1"
 	"github.com/tigera/operator/pkg/common"
 	"github.com/tigera/operator/pkg/components"
+	"github.com/tigera/operator/pkg/ptr"
 	"github.com/tigera/operator/pkg/render"
 	rcomponents "github.com/tigera/operator/pkg/render/common/components"
+	relasticsearch "github.com/tigera/operator/pkg/render/common/elasticsearch"
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
 	"github.com/tigera/operator/pkg/render/common/networkpolicy"
 	"github.com/tigera/operator/pkg/render/common/podaffinity"
-	"github.com/tigera/operator/pkg/render/common/podsecuritypolicy"
 	"github.com/tigera/operator/pkg/render/common/secret"
 	"github.com/tigera/operator/pkg/render/common/securitycontext"
+	"github.com/tigera/operator/pkg/render/common/securitycontextconstraints"
+	"github.com/tigera/operator/pkg/render/logstorage"
 	"github.com/tigera/operator/pkg/render/logstorage/esmetrics"
 	"github.com/tigera/operator/pkg/tls/certificatemanagement"
 )
@@ -52,7 +50,6 @@ import (
 const (
 	DeploymentName                                  = "tigera-linseed"
 	ServiceAccountName                              = "tigera-linseed"
-	PodSecurityPolicyName                           = "tigera-linseed"
 	PolicyName                                      = networkpolicy.TigeraComponentPolicyPrefix + "linseed-access"
 	PortName                                        = "tigera-linseed"
 	TargetPort                                      = 8444
@@ -100,9 +97,6 @@ type Config struct {
 	// Whether this is a management cluster
 	ManagementCluster bool
 
-	// Whether the cluster supports pod security policies.
-	UsePSP bool
-
 	// Elastic cluster configuration
 	ESClusterConfig *relasticsearch.ClusterConfig
 
@@ -122,6 +116,11 @@ type Config struct {
 	// Secret containing client certificate and key for connecting to the Elastic cluster. If configured,
 	// mTLS is used between Linseed and the external Elastic cluster.
 	ElasticClientSecret *corev1.Secret
+
+	// Secret containing the user linseed connects to Elasticsearch
+	// In a zero tenant setup, es-kubecontrollers create this secret
+	// In a multi-tenant setup, users controllers create this secret
+	ElasticClientCredentialsSecret *corev1.Secret
 
 	ElasticHost string
 	ElasticPort string
@@ -164,9 +163,6 @@ func (l *linseed) Objects() (toCreate, toDelete []client.Object) {
 	}
 	toCreate = append(toCreate, l.linseedServiceAccount())
 	toCreate = append(toCreate, l.linseedDeployment())
-	if l.cfg.UsePSP {
-		toCreate = append(toCreate, l.linseedPodSecurityPolicy())
-	}
 	if l.cfg.ElasticClientSecret != nil {
 		// If using External ES, we need to copy the client certificates into Linseed's naespace to be mounted.
 		toCreate = append(toCreate, secret.ToRuntimeObjects(secret.CopyToNamespace(l.cfg.Namespace, l.cfg.ElasticClientSecret)...)...)
@@ -238,12 +234,12 @@ func (l *linseed) linseedClusterRole() *rbacv1.ClusterRole {
 		}...)
 	}
 
-	if l.cfg.UsePSP {
+	if l.cfg.Installation.KubernetesProvider.IsOpenShift() {
 		rules = append(rules, rbacv1.PolicyRule{
-			APIGroups:     []string{"policy"},
-			Resources:     []string{"podsecuritypolicies"},
+			APIGroups:     []string{"security.openshift.io"},
+			Resources:     []string{"securitycontextconstraints"},
 			Verbs:         []string{"use"},
-			ResourceNames: []string{PodSecurityPolicyName},
+			ResourceNames: []string{securitycontextconstraints.NonRootV2},
 		})
 	}
 
@@ -302,10 +298,6 @@ func (l *linseed) multiTenantManagedClustersAccess() []client.Object {
 	})
 
 	return objects
-}
-
-func (l *linseed) linseedPodSecurityPolicy() *policyv1beta1.PodSecurityPolicy {
-	return podsecuritypolicy.NewBasePolicy(PodSecurityPolicyName)
 }
 
 func (l *linseed) linseedDeployment() *appsv1.Deployment {
@@ -426,6 +418,9 @@ func (l *linseed) linseedDeployment() *appsv1.Deployment {
 	annotations[l.cfg.KeyPair.HashAnnotationKey()] = l.cfg.KeyPair.HashAnnotationValue()
 	if l.cfg.ElasticClientSecret != nil {
 		annotations["hash.operator.tigera.io/elastic-client-secret"] = rmeta.SecretsAnnotationHash(l.cfg.ElasticClientSecret)
+	}
+	if l.cfg.ElasticClientCredentialsSecret != nil {
+		annotations[fmt.Sprintf("hash.operator.tigera.io/%s", render.ElasticsearchLinseedUserSecret)] = rmeta.SecretsAnnotationHash(l.cfg.ElasticClientCredentialsSecret)
 	}
 
 	if l.cfg.TokenKeyPair != nil {
@@ -559,7 +554,7 @@ func (l *linseed) linseedAllowTigeraPolicy() *v3.NetworkPolicy {
 	// - Cluster DNS
 	// - Elasticsearch
 	egressRules := []v3.Rule{}
-	egressRules = networkpolicy.AppendDNSEgressRules(egressRules, l.cfg.Installation.KubernetesProvider == operatorv1.ProviderOpenShift)
+	egressRules = networkpolicy.AppendDNSEgressRules(egressRules, l.cfg.Installation.KubernetesProvider.IsOpenShift())
 	egressRules = append(egressRules, []v3.Rule{
 		{
 			Action:      v3.Allow,

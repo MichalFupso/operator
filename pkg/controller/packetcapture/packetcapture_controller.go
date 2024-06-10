@@ -113,7 +113,6 @@ func newReconciler(mgr manager.Manager, opts options.AddOptions, tierWatchReady 
 		enterpriseCRDsExist: opts.EnterpriseCRDExists,
 		status:              status.New(mgr.GetClient(), ResourceName, opts.KubernetesVersion),
 		clusterDomain:       opts.ClusterDomain,
-		usePSP:              opts.UsePSP,
 		tierWatchReady:      tierWatchReady,
 		multiTenant:         opts.MultiTenant,
 	}
@@ -132,7 +131,6 @@ type ReconcilePacketCapture struct {
 	enterpriseCRDsExist bool
 	status              status.StatusManager
 	clusterDomain       string
-	usePSP              bool
 	tierWatchReady      *utils.ReadyFlag
 	multiTenant         bool
 }
@@ -281,14 +279,13 @@ func (r *ReconcilePacketCapture) Reconcile(ctx context.Context, request reconcil
 	trustedBundle := certificateManager.CreateTrustedBundle(certificates...)
 	packetCaptureApiCfg := &render.PacketCaptureApiConfiguration{
 		PullSecrets:                 pullSecrets,
-		Openshift:                   r.provider == operatorv1.ProviderOpenShift,
+		OpenShift:                   r.provider.IsOpenShift(),
 		Installation:                installationSpec,
 		KeyValidatorConfig:          keyValidatorConfig,
 		ServerCertSecret:            packetCaptureCertSecret,
 		ClusterDomain:               r.clusterDomain,
 		ManagementClusterConnection: managementClusterConnection,
 		TrustedBundle:               trustedBundle,
-		UsePSP:                      r.usePSP,
 		PacketCaptureAPI:            packetcaptureapi,
 	}
 	pc := render.PacketCaptureAPI(packetCaptureApiCfg)
