@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
+
 	operatorv1 "github.com/tigera/operator/api/v1"
 	"github.com/tigera/operator/pkg/common"
 	"github.com/tigera/operator/pkg/controller/certificatemanager"
@@ -591,7 +592,7 @@ func (r *ElasticSubController) Reconcile(ctx context.Context, request reconcile.
 	// In multi-tenant mode, ILM programming is created out of band
 	if !r.multiTenant {
 		if err := r.applyILMPolicies(ls, reqLogger, ctx); err != nil {
-			r.status.SetDegraded(operatorv1.ResourceNotReady, "Error applying ILM policies", nil, reqLogger)
+			r.status.SetDegraded(operatorv1.ResourceNotReady, "Error applying ILM policies", err, reqLogger)
 			return reconcile.Result{}, err
 		}
 	}
@@ -680,7 +681,7 @@ func (r *ElasticSubController) checkOIDCUsersEsResource(ctx context.Context) err
 
 func (r *ElasticSubController) applyILMPolicies(ls *operatorv1.LogStorage, reqLogger logr.Logger, ctx context.Context) error {
 	// ES should be in ready phase when execution reaches here, apply ILM polices
-	esClient, err := r.esCliCreator(r.client, ctx, relasticsearch.ECKElasticEndpoint())
+	esClient, err := r.esCliCreator(r.client, ctx, relasticsearch.ECKElasticEndpoint(), false)
 	if err != nil {
 		return err
 	}

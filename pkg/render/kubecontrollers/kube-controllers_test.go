@@ -42,6 +42,7 @@ import (
 	"github.com/tigera/operator/pkg/controller/k8sapi"
 	ctrlrfake "github.com/tigera/operator/pkg/ctrlruntime/client/fake"
 	"github.com/tigera/operator/pkg/dns"
+	"github.com/tigera/operator/pkg/render"
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
 	rtest "github.com/tigera/operator/pkg/render/common/test"
 	"github.com/tigera/operator/pkg/render/kubecontrollers"
@@ -1153,8 +1154,7 @@ var _ = Describe("kube-controllers rendering tests", func() {
 				kind    string
 			}{
 				{name: kubecontrollers.EsKubeControllerNetworkPolicyName, ns: tenant.Namespace, group: "projectcalico.org", version: "v3", kind: "NetworkPolicy"},
-				{name: kubecontrollers.MultiTenantManagedClustersAccessName, ns: "", group: "rbac.authorization.k8s.io", version: "v1", kind: "ClusterRole"},
-				{name: kubecontrollers.MultiTenantManagedClustersAccessName, ns: "", group: "rbac.authorization.k8s.io", version: "v1", kind: "ClusterRoleBinding"},
+				{name: kubecontrollers.MultiTenantManagedClustersAccessRoleBindingName, ns: tenant.Namespace, group: "rbac.authorization.k8s.io", version: "v1", kind: "RoleBinding"},
 				{name: kubecontrollers.KubeControllerServiceAccount, ns: tenant.Namespace, group: "", version: "v1", kind: "ServiceAccount"},
 				{name: kubecontrollers.EsKubeControllerRole, ns: "", group: "rbac.authorization.k8s.io", version: "v1", kind: "ClusterRole"},
 				{name: kubecontrollers.EsKubeControllerRoleBinding, ns: "", group: "rbac.authorization.k8s.io", version: "v1", kind: "ClusterRoleBinding"},
@@ -1253,22 +1253,11 @@ var _ = Describe("kube-controllers rendering tests", func() {
 				},
 			}))
 
-			managedClusterAccessClusterRole := rtest.GetResource(resources,
-				kubecontrollers.MultiTenantManagedClustersAccessName, "", rbacv1.GroupName, "v1", "ClusterRole").(*rbacv1.ClusterRole)
-			expectedManagedClusterAccessRules := []rbacv1.PolicyRule{
-				{
-					APIGroups: []string{"projectcalico.org"},
-					Resources: []string{"managedclusters"},
-					Verbs:     []string{"get"},
-				},
-			}
-			Expect(managedClusterAccessClusterRole.Rules).To(ContainElements(expectedManagedClusterAccessRules))
-
-			managedClusterAccessClusterRoleBinding := rtest.GetResource(resources,
-				kubecontrollers.MultiTenantManagedClustersAccessName,
-				"", rbacv1.GroupName, "v1", "ClusterRoleBinding").(*rbacv1.ClusterRoleBinding)
-			Expect(managedClusterAccessClusterRoleBinding.RoleRef.Name).To(Equal(kubecontrollers.MultiTenantManagedClustersAccessName))
-			Expect(managedClusterAccessClusterRoleBinding.Subjects).To(ConsistOf([]rbacv1.Subject{
+			managedClusterAccessRoleBinding := rtest.GetResource(resources,
+				kubecontrollers.MultiTenantManagedClustersAccessRoleBindingName,
+				tenant.Namespace, rbacv1.GroupName, "v1", "RoleBinding").(*rbacv1.RoleBinding)
+			Expect(managedClusterAccessRoleBinding.RoleRef.Name).To(Equal(render.MultiTenantManagedClustersAccessClusterRoleName))
+			Expect(managedClusterAccessRoleBinding.Subjects).To(ConsistOf([]rbacv1.Subject{
 				{
 					Kind:      "ServiceAccount",
 					Name:      kubecontrollers.KubeControllerServiceAccount,
@@ -1276,5 +1265,41 @@ var _ = Describe("kube-controllers rendering tests", func() {
 				},
 			}))
 		})
+
+		It("should override resource request with the value from TenantSpec's esKubeControllerDeployment when available", func() {
+			overwrites := corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					"cpu":     resource.MustParse("2"),
+					"memory":  resource.MustParse("300Mi"),
+					"storage": resource.MustParse("20Gi"),
+				},
+				Requests: corev1.ResourceList{
+					"cpu":     resource.MustParse("1"),
+					"memory":  resource.MustParse("150Mi"),
+					"storage": resource.MustParse("10Gi"),
+				},
+			}
+			esKubeControllerDeployment := &operatorv1.CalicoKubeControllersDeployment{
+				Spec: &operatorv1.CalicoKubeControllersDeploymentSpec{
+					Template: &operatorv1.CalicoKubeControllersDeploymentPodTemplateSpec{
+						Spec: &operatorv1.CalicoKubeControllersDeploymentPodSpec{
+							Containers: []operatorv1.CalicoKubeControllersDeploymentContainer{{
+								Name:      "es-calico-kube-controllers",
+								Resources: &overwrites,
+							}},
+						},
+					},
+				},
+			}
+			tenantCfg.Tenant.Spec.ESKubeControllerDeployment = esKubeControllerDeployment
+			component := kubecontrollers.NewElasticsearchKubeControllers(&tenantCfg)
+			resources, _ := component.Objects()
+
+			d := rtest.GetResource(resources, kubecontrollers.EsKubeController, tenantCfg.Namespace, appsv1.GroupName, "v1", "Deployment").(*appsv1.Deployment)
+			Expect(d.Spec.Template.Spec.Containers).To(HaveLen(1))
+			Expect(d.Spec.Template.Spec.Containers[0].Name).To(Equal("es-calico-kube-controllers"))
+			Expect(d.Spec.Template.Spec.Containers[0].Resources).To(Equal(overwrites))
+		})
+
 	})
 })

@@ -251,7 +251,7 @@ func GetManager(ctx context.Context, cli client.Client, mt bool, ns string) (*op
 func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	// Perform any common preparation that needs to be done for single-tenant and multi-tenant scenarios.
 	helper := utils.NewNamespaceHelper(r.multiTenant, render.ManagerNamespace, request.Namespace)
-	logc := log.WithValues("Request.Namespace", request.Namespace, "Request.Name", request.Name, "installNS", helper.InstallNamespace(), "truthNS", helper.TruthNamespace())
+	logc := log.WithValues("Request.Namespace", request.Namespace, "Request.Name", request.Name, "installNS", helper.InstallNamespace(), "truthNS", helper.TruthNamespace(), "multi-tenant", r.multiTenant)
 	logc.Info("Reconciling Manager")
 
 	// We skip requests without a namespace specified in multi-tenant setups.
@@ -632,12 +632,6 @@ func (r *ReconcileManager) Reconcile(ctx context.Context, request reconcile.Requ
 	namespaces, err := helper.TenantNamespaces(r.client)
 	if err != nil {
 		return reconcile.Result{}, err
-	}
-	if tenant.MultiTenant() {
-		// In a multi-tenant environment, we need to grant access to the canonical tigera-manager:tigera-manager service account
-		// so that es-proxy passes Voltron's authorization checks when accessing managed clusters. This is because per-tenant manager instances
-		// impersonate as this serviceaccount on these flows.
-		namespaces = append(namespaces, render.ManagerNamespace)
 	}
 
 	routeConfig, err := getVoltronRouteConfig(ctx, r.client, helper.InstallNamespace())

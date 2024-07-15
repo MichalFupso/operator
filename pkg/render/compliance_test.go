@@ -1080,8 +1080,7 @@ var _ = Describe("compliance rendering tests", func() {
 			tenantAExpectedResources := []client.Object{
 				&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "tigera-compliance-server", Namespace: tenantANamespace}},
 				&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "tigera-compliance-server"}},
-				&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: render.MultiTenantComplianceManagedClustersAccessClusterRoleName}},
-				&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.MultiTenantComplianceManagedClustersAccessClusterRoleName}},
+				&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.MultiTenantComplianceManagedClustersAccessRoleBindingName, Namespace: tenantANamespace}},
 				&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: render.ComplianceSnapshotterServiceAccount}},
 				&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.ComplianceSnapshotterServiceAccount}},
 				&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: render.ComplianceBenchmarkerServiceAccount}},
@@ -1123,8 +1122,7 @@ var _ = Describe("compliance rendering tests", func() {
 			tenantBExpectedResources := []client.Object{
 				&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "tigera-compliance-server", Namespace: tenantBNamespace}},
 				&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "tigera-compliance-server"}},
-				&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: render.MultiTenantComplianceManagedClustersAccessClusterRoleName}},
-				&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.MultiTenantComplianceManagedClustersAccessClusterRoleName}},
+				&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.MultiTenantComplianceManagedClustersAccessRoleBindingName, Namespace: tenantBNamespace}},
 				&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: render.ComplianceSnapshotterServiceAccount}},
 				&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.ComplianceSnapshotterServiceAccount}},
 				&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: render.ComplianceBenchmarkerServiceAccount}},
@@ -1146,6 +1144,69 @@ var _ = Describe("compliance rendering tests", func() {
 				envs := deployment.Spec.Template.Spec.Containers[0].Env
 				Expect(envs).To(ContainElement(corev1.EnvVar{Name: "TIGERA_COMPLIANCE_JOB_NAMESPACE", Value: tenantBNamespace}))
 			}
+		})
+
+		It("should bind multiple tenant to clusterrole", func() {
+			cfg.Namespace = tenantANamespace
+			cfg.ExternalElastic = true
+			cfg.BindingNamespaces = []string{tenantANamespace}
+			cfg.Tenant = &operatorv1.Tenant{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tenantA",
+					Namespace: tenantANamespace,
+				},
+				Spec: operatorv1.TenantSpec{
+					ID: "tenant-a-id",
+				},
+			}
+			tenantACompliance, err := render.Compliance(cfg)
+			Expect(err).NotTo(HaveOccurred())
+
+			tenantAResources, _ := tenantACompliance.Objects()
+
+			rbTenantA := rtest.GetResource(tenantAResources, render.ComplianceServerServiceAccount, "", rbacv1.GroupName, "v1", "ClusterRoleBinding").(*rbacv1.ClusterRoleBinding)
+			Expect(rbTenantA.RoleRef.Kind).To(Equal("ClusterRole"))
+			Expect(rbTenantA.RoleRef.Name).To(Equal(render.ComplianceServerServiceAccount))
+			Expect(rbTenantA.Subjects).To(ContainElements([]rbacv1.Subject{
+				{
+					Kind:      "ServiceAccount",
+					Name:      render.ComplianceServerServiceAccount,
+					Namespace: tenantANamespace,
+				},
+			}))
+
+			cfg.Namespace = tenantBNamespace
+			cfg.BindingNamespaces = []string{tenantANamespace, tenantBNamespace}
+			cfg.Tenant = &operatorv1.Tenant{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tenantB",
+					Namespace: tenantBNamespace,
+				},
+				Spec: operatorv1.TenantSpec{
+					ID: "tenant-b-id",
+				},
+			}
+			tenantBCompliance, err := render.Compliance(cfg)
+			Expect(err).NotTo(HaveOccurred())
+
+			tenantBResources, _ := tenantBCompliance.Objects()
+
+			rbAllTenants := rtest.GetResource(tenantBResources, render.ComplianceServerServiceAccount, "", rbacv1.GroupName, "v1", "ClusterRoleBinding").(*rbacv1.ClusterRoleBinding)
+			Expect(rbAllTenants.RoleRef.Kind).To(Equal("ClusterRole"))
+			Expect(rbAllTenants.RoleRef.Name).To(Equal(render.ComplianceServerServiceAccount))
+			Expect(rbAllTenants.Subjects).To(ContainElements([]rbacv1.Subject{
+				{
+					Kind:      "ServiceAccount",
+					Name:      render.ComplianceServerServiceAccount,
+					Namespace: tenantANamespace,
+				},
+				{
+					Kind:      "ServiceAccount",
+					Name:      render.ComplianceServerServiceAccount,
+					Namespace: tenantBNamespace,
+				},
+			}))
+
 		})
 
 		It("should render multi-tenant environment variables", func() {
@@ -1224,20 +1285,9 @@ var _ = Describe("compliance rendering tests", func() {
 			tenantACompliance, err := render.Compliance(cfg)
 			Expect(err).NotTo(HaveOccurred())
 			resources, _ := tenantACompliance.Objects()
-			cr := rtest.GetResource(resources, render.MultiTenantComplianceManagedClustersAccessClusterRoleName, "", rbacv1.GroupName, "v1", "ClusterRole").(*rbacv1.ClusterRole)
-			expectedRules := []rbacv1.PolicyRule{
-				{
-					APIGroups: []string{"projectcalico.org"},
-					Resources: []string{"managedclusters"},
-					Verbs: []string{
-						"get",
-					},
-				},
-			}
-			Expect(cr.Rules).To(ContainElements(expectedRules))
-			rb := rtest.GetResource(resources, render.MultiTenantComplianceManagedClustersAccessClusterRoleName, "", rbacv1.GroupName, "v1", "ClusterRoleBinding").(*rbacv1.ClusterRoleBinding)
+			rb := rtest.GetResource(resources, render.MultiTenantComplianceManagedClustersAccessRoleBindingName, tenantANamespace, rbacv1.GroupName, "v1", "RoleBinding").(*rbacv1.RoleBinding)
 			Expect(rb.RoleRef.Kind).To(Equal("ClusterRole"))
-			Expect(rb.RoleRef.Name).To(Equal(render.MultiTenantComplianceManagedClustersAccessClusterRoleName))
+			Expect(rb.RoleRef.Name).To(Equal(render.MultiTenantManagedClustersAccessClusterRoleName))
 			Expect(rb.Subjects).To(ContainElements([]rbacv1.Subject{
 				{
 					Kind:      "ServiceAccount",
