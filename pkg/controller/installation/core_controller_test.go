@@ -890,6 +890,54 @@ var _ = Describe("Testing core-controller installation", func() {
 			cancel()
 		})
 
+		Context("with LinuxDataplane=Nftables", func() {
+			BeforeEach(func() {
+				By("Setting the dataplane to nftables in the Installation")
+				nft := operator.LinuxDataplaneNftables
+				cr.Spec.CalicoNetwork = &operator.CalicoNetworkSpec{
+					LinuxDataplane: &nft,
+				}
+				Expect(c.Create(ctx, cr)).NotTo(HaveOccurred())
+			})
+
+			It("should set NFTablesMode to Enabled on FelixConfiguration", func() {
+				By("r.Reconcile()")
+				_, err := r.Reconcile(ctx, reconcile.Request{})
+				Expect(err).ShouldNot(HaveOccurred())
+
+				By("Checking that the FelixConfiguration has NFTablesMode Enabled")
+				fc := &crdv1.FelixConfiguration{}
+				err = c.Get(ctx, types.NamespacedName{Name: "default"}, fc)
+				Expect(err).ShouldNot(HaveOccurred())
+				Expect(fc.Spec.NFTablesMode).ToNot(BeNil())
+				Expect(*fc.Spec.NFTablesMode).To(Equal(crdv1.NFTablesModeEnabled))
+			})
+
+			It("should set NFTablesMode to Disabled if nftables mode is changed", func() {
+				// Reconcile. This should set NFTablesMode to true.
+				_, err := r.Reconcile(ctx, reconcile.Request{})
+				Expect(err).ShouldNot(HaveOccurred())
+
+				// Set the dataplane to IPTables.
+				err = c.Get(ctx, types.NamespacedName{Name: "default"}, cr)
+				Expect(err).ShouldNot(HaveOccurred())
+				ipt := operator.LinuxDataplaneIptables
+				cr.Spec.CalicoNetwork.LinuxDataplane = &ipt
+				Expect(c.Update(ctx, cr)).NotTo(HaveOccurred())
+
+				// Reconcile again. This should disble NFTablesMode.
+				_, err = r.Reconcile(ctx, reconcile.Request{})
+				Expect(err).ShouldNot(HaveOccurred())
+
+				By("checking that the FelixConfiguration has NFTablesMode Disabled")
+				fc := &crdv1.FelixConfiguration{}
+				err = c.Get(ctx, types.NamespacedName{Name: "default"}, fc)
+				Expect(err).ShouldNot(HaveOccurred())
+				Expect(fc.Spec.NFTablesMode).NotTo(BeNil())
+				Expect(*fc.Spec.NFTablesMode).To(Equal(crdv1.NFTablesModeDisabled))
+			})
+		})
+
 		It("should Reconcile with default config", func() {
 			Expect(c.Create(ctx, cr)).NotTo(HaveOccurred())
 			_, err := r.Reconcile(ctx, reconcile.Request{})
@@ -910,6 +958,36 @@ var _ = Describe("Testing core-controller installation", func() {
 			Expect(fc.Annotations[render.BPFOperatorAnnotation]).To(Equal("false"))
 			Expect(fc.Spec.BPFEnabled).NotTo(BeNil())
 			Expect(*fc.Spec.BPFEnabled).To(BeFalse())
+		})
+
+		It("should set vxlanPort to 4798 when provider is DockerEE", func() {
+			cr.Spec.KubernetesProvider = operator.ProviderDockerEE
+			Expect(c.Create(ctx, cr)).NotTo(HaveOccurred())
+			_, err := r.Reconcile(ctx, reconcile.Request{})
+			Expect(err).ShouldNot(HaveOccurred())
+
+			fc := &crdv1.FelixConfiguration{}
+			err = c.Get(ctx, types.NamespacedName{Name: "default"}, fc)
+			Expect(err).ShouldNot(HaveOccurred())
+
+			Expect(fc.Spec.VXLANVNI).NotTo(BeNil())
+			Expect(*fc.Spec.VXLANVNI).To(Equal(10000))
+		})
+
+		It("should set bpfHostConntrackByPass to false when provider is DockerEE and BPF enabled", func() {
+			cr.Spec.KubernetesProvider = operator.ProviderDockerEE
+			network := operator.LinuxDataplaneBPF
+			cr.Spec.CalicoNetwork = &operator.CalicoNetworkSpec{LinuxDataplane: &network}
+			Expect(c.Create(ctx, cr)).NotTo(HaveOccurred())
+			_, err := r.Reconcile(ctx, reconcile.Request{})
+			Expect(err).ShouldNot(HaveOccurred())
+
+			fc := &crdv1.FelixConfiguration{}
+			err = c.Get(ctx, types.NamespacedName{Name: "default"}, fc)
+			Expect(err).ShouldNot(HaveOccurred())
+
+			Expect(fc.Spec.BPFHostConntrackBypass).NotTo(BeNil())
+			Expect(*fc.Spec.BPFHostConntrackBypass).To(BeFalse())
 		})
 
 		It("should set BPFEnabled to ture on FelixConfiguration if BPF is enabled on installation", func() {
