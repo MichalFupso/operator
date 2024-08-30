@@ -181,6 +181,10 @@ func (c *apiServerComponent) Objects() ([]client.Object, []client.Object) {
 	globalObjects := []client.Object{
 		c.calicoCustomResourcesClusterRole(),
 		c.calicoCustomResourcesClusterRoleBinding(),
+		c.tierGetterClusterRole(),
+		c.kubeControllerMgrTierGetterClusterRoleBinding(),
+		c.calicoPolicyPassthruClusterRole(),
+		c.calicoPolicyPassthruClusterRolebinding(),
 	}
 
 	// These objects are global, and have different names based on Calico or Calico Enterprise.
@@ -217,10 +221,8 @@ func (c *apiServerComponent) Objects() ([]client.Object, []client.Object) {
 	// Global enterprise-only objects.
 	globalEnterpriseObjects := []client.Object{
 		CreateNamespace(rmeta.APIServerNamespace(operatorv1.TigeraSecureEnterprise), c.cfg.Installation.KubernetesProvider, PSSPrivileged),
-		c.tigeraCustomResourcesClusterRole(),
-		c.tigeraCustomResourcesClusterRoleBinding(),
-		c.tierGetterClusterRole(),
-		c.kubeControllerMgrTierGetterClusterRoleBinding(),
+		c.tigeraApiServerClusterRole(),
+		c.tigeraApiServerClusterRoleBinding(),
 		c.uisettingsgroupGetterClusterRole(),
 		c.kubeControllerMgrUisettingsgroupGetterClusterRoleBinding(),
 		c.tieredPolicyPassthruClusterRole(),
@@ -290,6 +292,9 @@ func (c *apiServerComponent) Objects() ([]client.Object, []client.Object) {
 		// Namespaced objects will be handled by namespace deletion.
 		objsToDelete = append(objsToDelete, globalEnterpriseObjects...)
 	}
+
+	// Explicitly delete any renamed/deprecated objects.
+	objsToDelete = append(objsToDelete, c.getDeprecatedResources()...)
 
 	objsToCreate := append(globalObjects, namespacedObjects...)
 	return objsToCreate, objsToDelete
@@ -562,6 +567,7 @@ func (c *apiServerComponent) calicoCustomResourcesClusterRole() *rbacv1.ClusterR
 				"ipamblocks",
 				"blockaffinities",
 				"ipamconfigs",
+				"tiers",
 			},
 			Verbs: []string{
 				"get",
@@ -1214,10 +1220,10 @@ func (c *apiServerComponent) networkPolicy() *netv1.NetworkPolicy {
 	}
 }
 
-// tigeraCustomResourcesClusterRole creates a clusterrole that gives permissions to access backing CRDs
+// tigeraApiServerClusterRole creates a clusterrole that gives permissions to access backing CRDs
 //
 // Calico Enterprise only
-func (c *apiServerComponent) tigeraCustomResourcesClusterRole() *rbacv1.ClusterRole {
+func (c *apiServerComponent) tigeraApiServerClusterRole() *rbacv1.ClusterRole {
 	rules := []rbacv1.PolicyRule{
 		{
 			// Calico Enterprise backing storage.
@@ -1226,7 +1232,6 @@ func (c *apiServerComponent) tigeraCustomResourcesClusterRole() *rbacv1.ClusterR
 				"stagedkubernetesnetworkpolicies",
 				"stagednetworkpolicies",
 				"stagedglobalnetworkpolicies",
-				"tiers",
 				"licensekeys",
 				"alertexceptions",
 				"globalalerts",
@@ -1258,26 +1263,37 @@ func (c *apiServerComponent) tigeraCustomResourcesClusterRole() *rbacv1.ClusterR
 				"patch",
 			},
 		},
+		{
+			// this rbac group (authorizationreview) is required for apiserver service account because:
+			// - queryserver (part of the apiserver pod) needs to authorize users for tiered resources (policies) to return the
+			// appropriate result set where user is authorized to have access to all items in the result set.
+			// - for authorization, queryserver needs to create authorizationReview resource.
+			// - queryserver needs to have "create" on "authorizationreviews" to be able to create authrozationreview
+			// and get user's permissions on both tiered and non-tiered resources.
+			APIGroups: []string{"projectcalico.org"},
+			Resources: []string{"authorizationreviews"},
+			Verbs:     []string{"create"},
+		},
 	}
 
 	return &rbacv1.ClusterRole{
 		TypeMeta: metav1.TypeMeta{Kind: "ClusterRole", APIVersion: "rbac.authorization.k8s.io/v1"},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "tigera-crds",
+			Name: "tigera-apiserver",
 		},
 		Rules: rules,
 	}
 }
 
-// tigeraCustomResourcesClusterRoleBinding creates a clusterrolebinding that applies tigeraCustomResourcesClusterRole to
+// tigeraApiServerClusterRoleBinding creates a clusterrolebinding that applies tigeraApiServerClusterRole to
 // the tigera-apiserver service account.
 //
 // Calico Enterprise only
-func (c *apiServerComponent) tigeraCustomResourcesClusterRoleBinding() *rbacv1.ClusterRoleBinding {
+func (c *apiServerComponent) tigeraApiServerClusterRoleBinding() *rbacv1.ClusterRoleBinding {
 	return &rbacv1.ClusterRoleBinding{
 		TypeMeta: metav1.TypeMeta{Kind: "ClusterRoleBinding", APIVersion: "rbac.authorization.k8s.io/v1"},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "tigera-apiserver-access-tigera-crds",
+			Name: "tigera-apiserver",
 		},
 		Subjects: []rbacv1.Subject{
 			{
@@ -1288,20 +1304,18 @@ func (c *apiServerComponent) tigeraCustomResourcesClusterRoleBinding() *rbacv1.C
 		},
 		RoleRef: rbacv1.RoleRef{
 			Kind:     "ClusterRole",
-			Name:     "tigera-crds",
+			Name:     "tigera-apiserver",
 			APIGroup: "rbac.authorization.k8s.io",
 		},
 	}
 }
 
 // tierGetterClusterRole creates a clusterrole that gives permissions to get tiers.
-//
-// Calico Enterprise only
 func (c *apiServerComponent) tierGetterClusterRole() *rbacv1.ClusterRole {
 	return &rbacv1.ClusterRole{
 		TypeMeta: metav1.TypeMeta{Kind: "ClusterRole", APIVersion: "rbac.authorization.k8s.io/v1"},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "tigera-tier-getter",
+			Name: "calico-tier-getter",
 		},
 		Rules: []rbacv1.PolicyRule{
 			{
@@ -1318,17 +1332,15 @@ func (c *apiServerComponent) tierGetterClusterRole() *rbacv1.ClusterRole {
 // kubeControllerMgrTierGetterClusterRoleBinding creates a rolebinding that allows the k8s kube-controller manager to
 // get tiers. In k8s 1.15+, cascading resource deletions (for instance pods for a replicaset) failed
 // due to k8s kube-controller not having permissions to get tiers.
-//
-// Calico Enterprise only
 func (c *apiServerComponent) kubeControllerMgrTierGetterClusterRoleBinding() *rbacv1.ClusterRoleBinding {
 	return &rbacv1.ClusterRoleBinding{
 		TypeMeta: metav1.TypeMeta{Kind: "ClusterRoleBinding", APIVersion: "rbac.authorization.k8s.io/v1"},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "tigera-tier-getter",
+			Name: "calico-tier-getter",
 		},
 		RoleRef: rbacv1.RoleRef{
 			Kind:     "ClusterRole",
-			Name:     "tigera-tier-getter",
+			Name:     "calico-tier-getter",
 			APIGroup: "rbac.authorization.k8s.io",
 		},
 		Subjects: []rbacv1.Subject{
@@ -1521,6 +1533,11 @@ func (c *apiServerComponent) tigeraUserClusterRole() *rbacv1.ClusterRole {
 			Resources: []string{"applicationlayers", "packetcaptureapis", "compliances", "intrusiondetections"},
 			Verbs:     []string{"get"},
 		},
+		{
+			APIGroups: []string{"apps"},
+			Resources: []string{"deployments"},
+			Verbs:     []string{"get", "list", "watch"},
+		},
 		// Allow the user to read services to view WAF configuration.
 		{
 			APIGroups: []string{""},
@@ -1689,7 +1706,12 @@ func (c *apiServerComponent) tigeraNetworkAdminClusterRole() *rbacv1.ClusterRole
 			Resources: []string{"applicationlayers", "packetcaptureapis", "compliances", "intrusiondetections"},
 			Verbs:     []string{"get", "update", "patch", "create", "delete"},
 		},
-		// Allow the user to read services to view WAF configuration.
+		// Allow the user to read deployments to view WAF configuration.
+		{
+			APIGroups: []string{"apps"},
+			Resources: []string{"deployments"},
+			Verbs:     []string{"get", "list", "watch", "patch"},
+		},
 		{
 			APIGroups: []string{""},
 			Resources: []string{"services"},
@@ -1751,6 +1773,49 @@ func (c *apiServerComponent) tigeraNetworkAdminClusterRole() *rbacv1.ClusterRole
 	}
 }
 
+// calicoPolicyPassthruClusterRole creates a clusterrole that is used to control the RBAC
+// mechanism for Calico tiered policy.
+func (c *apiServerComponent) calicoPolicyPassthruClusterRole() *rbacv1.ClusterRole {
+	return &rbacv1.ClusterRole{
+		TypeMeta: metav1.TypeMeta{Kind: "ClusterRole", APIVersion: "rbac.authorization.k8s.io/v1"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "calico-tiered-policy-passthrough",
+		},
+		// If tiered policy is enabled we allow all authenticated users to access the main tier resource, instead
+		// restricting access using the tier.xxx resource type. Kubernetes NetworkPolicy and the
+		// StagedKubernetesNetworkPolicy are handled using normal (non-tiered) RBAC.
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"projectcalico.org"},
+				Resources: []string{"networkpolicies", "globalnetworkpolicies"},
+				Verbs:     []string{"*"},
+			},
+		},
+	}
+}
+
+// calicoPolicyPassthruClusterRolebinding creates a clusterrolebinding that applies calicoPolicyPassthruClusterRole to all users.
+func (c *apiServerComponent) calicoPolicyPassthruClusterRolebinding() *rbacv1.ClusterRoleBinding {
+	return &rbacv1.ClusterRoleBinding{
+		TypeMeta: metav1.TypeMeta{Kind: "ClusterRoleBinding", APIVersion: "rbac.authorization.k8s.io/v1"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "calico-tiered-policy-passthrough",
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:     "Group",
+				Name:     "system:authenticated",
+				APIGroup: "rbac.authorization.k8s.io",
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			Kind:     "ClusterRole",
+			Name:     "calico-tiered-policy-passthrough",
+			APIGroup: "rbac.authorization.k8s.io",
+		},
+	}
+}
+
 // tieredPolicyPassthruClusterRole creates a clusterrole that is used to control the RBAC
 // mechanism for Tigera Secure tiered policy.
 //
@@ -1767,7 +1832,7 @@ func (c *apiServerComponent) tieredPolicyPassthruClusterRole() *rbacv1.ClusterRo
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups: []string{"projectcalico.org"},
-				Resources: []string{"networkpolicies", "globalnetworkpolicies", "stagednetworkpolicies", "stagedglobalnetworkpolicies"},
+				Resources: []string{"stagednetworkpolicies", "stagedglobalnetworkpolicies"},
 				Verbs:     []string{"*"},
 			},
 		},
@@ -1905,4 +1970,44 @@ func (c *apiServerComponent) multiTenantManagedClusterAccessClusterRoles() []cli
 	})
 
 	return objects
+}
+
+func (c *apiServerComponent) getDeprecatedResources() []client.Object {
+	var renamedRscList []client.Object
+
+	// renamed clusterrole tigera-crds to tigera-apiserver
+	renamedRscList = append(renamedRscList, &rbacv1.ClusterRole{
+		TypeMeta: metav1.TypeMeta{Kind: "ClusterRole", APIVersion: "rbac.authorization.k8s.io/v1"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "tigera-crds",
+		},
+	})
+
+	// renamed clusterrolebinding tigera-apiserver-access-tigera-crds to tigera-apiserver
+	renamedRscList = append(renamedRscList, &rbacv1.ClusterRoleBinding{
+		TypeMeta: metav1.TypeMeta{Kind: "ClusterRoleBinding", APIVersion: "rbac.authorization.k8s.io/v1"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "tigera-apiserver-access-tigera-crds",
+		},
+	})
+
+	// The following resources were not present in Calico OSS, so there is no need to clean up in OSS.
+	if c.cfg.Installation.Variant == operatorv1.TigeraSecureEnterprise {
+		// Renamed ClusterRoleBinging tigera-tier-getter to calico-tier-getter since Tier is available in OSS
+		renamedRscList = append(renamedRscList, &rbacv1.ClusterRoleBinding{
+			TypeMeta: metav1.TypeMeta{Kind: "ClusterRoleBinding", APIVersion: "rbac.authorization.k8s.io/v1"},
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "tigera-tier-getter",
+			},
+		})
+		// Renamed ClusterRole tigera-tier-getter to calico-tier-getter since Tier is available in OSS
+		renamedRscList = append(renamedRscList, &rbacv1.ClusterRole{
+			TypeMeta: metav1.TypeMeta{Kind: "ClusterRole", APIVersion: "rbac.authorization.k8s.io/v1"},
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "tigera-tier-getter",
+			},
+		})
+	}
+
+	return renamedRscList
 }
