@@ -41,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
+
 	operatorv1 "github.com/tigera/operator/api/v1"
 	"github.com/tigera/operator/pkg/apis"
 	"github.com/tigera/operator/pkg/common"
@@ -125,6 +126,8 @@ var _ = Describe("LogStorage controller", func() {
 		Expect(rbacv1.SchemeBuilder.AddToScheme(scheme)).ShouldNot(HaveOccurred())
 		Expect(batchv1.SchemeBuilder.AddToScheme(scheme)).ShouldNot(HaveOccurred())
 		Expect(admissionv1beta1.SchemeBuilder.AddToScheme(scheme)).ShouldNot(HaveOccurred())
+		Expect(esv1.SchemeBuilder.AddToScheme(scheme)).ShouldNot(HaveOccurred())
+		Expect(kbv1.SchemeBuilder.AddToScheme(scheme)).ShouldNot(HaveOccurred())
 
 		ctx = context.Background()
 		cli = ctrlrfake.DefaultFakeClientBuilder(scheme).WithStatusSubresource(ctrlrclient.TypesWithStatuses(scheme, esv1.GroupVersion, kbv1.GroupVersion)...).Build()
@@ -382,13 +385,13 @@ var _ = Describe("LogStorage controller", func() {
 				Expect(cli.Get(ctx, esObjKey, es)).ShouldNot(HaveOccurred())
 
 				es.Status.Phase = esv1.ElasticsearchReadyPhase
-				Expect(cli.Update(ctx, es)).ShouldNot(HaveOccurred())
+				Expect(cli.Status().Update(ctx, es)).ShouldNot(HaveOccurred())
 
 				kb := &kbv1.Kibana{}
 				Expect(cli.Get(ctx, kbObjKey, kb)).ShouldNot(HaveOccurred())
 
 				kb.Status.AssociationStatus = cmnv1.AssociationEstablished
-				Expect(cli.Update(ctx, kb)).ShouldNot(HaveOccurred())
+				Expect(cli.Status().Update(ctx, kb)).ShouldNot(HaveOccurred())
 
 				// Create public KB secret. This is created by the secret controller in a real cluster.
 				kibanaKeyPair, err := certificateManager.GetOrCreateKeyPair(r.client, kibana.TigeraKibanaCertSecret, common.OperatorNamespace(), kbDNSNames)
@@ -499,13 +502,13 @@ var _ = Describe("LogStorage controller", func() {
 				Expect(cli.Get(ctx, esObjKey, es)).ShouldNot(HaveOccurred())
 
 				es.Status.Phase = esv1.ElasticsearchReadyPhase
-				Expect(cli.Update(ctx, es)).ShouldNot(HaveOccurred())
+				Expect(cli.Status().Update(ctx, es)).ShouldNot(HaveOccurred())
 
 				kb := &kbv1.Kibana{}
 				Expect(cli.Get(ctx, kbObjKey, kb)).ShouldNot(HaveOccurred())
 
 				kb.Status.AssociationStatus = cmnv1.AssociationEstablished
-				Expect(cli.Update(ctx, kb)).ShouldNot(HaveOccurred())
+				Expect(cli.Status().Update(ctx, kb)).ShouldNot(HaveOccurred())
 
 				// Create public KB secret. This is created by the secret controller in a real cluster.
 				kibanaKeyPair, err := certificateManager.GetOrCreateKeyPair(r.client, kibana.TigeraKibanaCertSecret, common.OperatorNamespace(), kbDNSNames)
@@ -858,7 +861,7 @@ var _ = Describe("LogStorage controller", func() {
 					Expect(escfg.Spec.NodeSets).To(HaveLen(1))
 					// The Image is not populated for the container so no need to get and check it
 					Expect(escfg.Spec.NodeSets[0].PodTemplate.Spec.Containers).To(HaveLen(1))
-					Expect(escfg.Spec.NodeSets[0].PodTemplate.Spec.InitContainers).To(HaveLen(1))
+					Expect(escfg.Spec.NodeSets[0].PodTemplate.Spec.InitContainers).To(HaveLen(3))
 					initset := test.GetContainer(escfg.Spec.NodeSets[0].PodTemplate.Spec.InitContainers, "elastic-internal-init-os-settings")
 					Expect(initset).ToNot(BeNil())
 					Expect(initset.Image).To(Equal(
@@ -942,7 +945,7 @@ var _ = Describe("LogStorage controller", func() {
 					Expect(escfg.Spec.NodeSets).To(HaveLen(1))
 					// The Image is not populated for the container so no need to get and check it
 					Expect(escfg.Spec.NodeSets[0].PodTemplate.Spec.Containers).To(HaveLen(1))
-					Expect(escfg.Spec.NodeSets[0].PodTemplate.Spec.InitContainers).To(HaveLen(1))
+					Expect(escfg.Spec.NodeSets[0].PodTemplate.Spec.InitContainers).To(HaveLen(3))
 					initset := test.GetContainer(escfg.Spec.NodeSets[0].PodTemplate.Spec.InitContainers, "elastic-internal-init-os-settings")
 					Expect(initset).ToNot(BeNil())
 					Expect(initset.Image).To(Equal(

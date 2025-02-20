@@ -1,4 +1,4 @@
-// Copyright (c) 2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2025 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -70,11 +70,6 @@ var (
 
 // Kibana renders the components necessary for kibana and elasticsearch
 func Kibana(cfg *Configuration) render.Component {
-	if cfg.Enabled && operatorv1.IsFIPSModeEnabled(cfg.Installation.FIPSMode) {
-		// This branch should only be hit if there is a coding bug in the controller, as Enabled
-		// should already take into account FIPS.
-		panic("BUG: Kibana is not supported in FIPS mode")
-	}
 	return &kibana{
 		cfg: cfg,
 	}
@@ -127,7 +122,7 @@ func (k *kibana) ResolveImages(is *operatorv1.ImageSet) error {
 	}
 
 	if len(errMsgs) != 0 {
-		return fmt.Errorf(strings.Join(errMsgs, ","))
+		return fmt.Errorf("%s", strings.Join(errMsgs, ","))
 	}
 	return nil
 }
@@ -156,9 +151,10 @@ func (k *kibana) Objects() ([]client.Object, []client.Object) {
 		// - securityContext.capabilities.drop=["ALL"]
 		// - securityContext.runAsNonRoot=true
 		// - securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost"
-		toCreate = append(toCreate, render.CreateNamespace(Namespace, k.cfg.Installation.KubernetesProvider, render.PSSBaseline))
+		toCreate = append(toCreate, render.CreateNamespace(Namespace, k.cfg.Installation.KubernetesProvider, render.PSSBaseline, k.cfg.Installation.Azure))
 		toCreate = append(toCreate, k.allowTigeraPolicy())
 		toCreate = append(toCreate, networkpolicy.AllowTigeraDefaultDeny(Namespace))
+		toCreate = append(toCreate, render.CreateOperatorSecretsRoleBinding(Namespace))
 		toCreate = append(toCreate, k.serviceAccount())
 
 		if k.cfg.Installation.KubernetesProvider.IsOpenShift() {
@@ -215,6 +211,9 @@ func (k *kibana) kibanaCR() *kbv1.Kibana {
 		"basePath":        fmt.Sprintf("/%s", BasePath),
 		"rewriteBasePath": true,
 		"defaultRoute":    fmt.Sprintf(DefaultRoute, TimeFilter, url.PathEscape(FlowsDashboardName)),
+		"customResponseHeaders": map[string]interface{}{
+			"X-Frame-Options": "DENY",
+		},
 	}
 
 	if k.cfg.BaseURL != "" {
@@ -238,7 +237,15 @@ func (k *kibana) kibanaCR() *kbv1.Kibana {
 	var initContainers []corev1.Container
 	var volumes []corev1.Volume
 	var automountToken bool
-	var volumeMounts []corev1.VolumeMount
+	volumeMounts := []corev1.VolumeMount{
+		{
+			// We need to override this mount and change the mountPath. Otherwise, ECK will mount an emptyDir in the
+			// original location (/usr/share/kibana/plugins), which would remove our custom theme resulting in
+			// crash-looping pods, because our custom config is unexpected.
+			Name:      "kibana-plugins",
+			MountPath: "/mnt/dummy-location/",
+		},
+	}
 	if k.cfg.Installation.CertificateManagement != nil {
 		config["elasticsearch.ssl.certificateAuthorities"] = []string{"/mnt/elastic-internal/http-certs/ca.crt"}
 		automountToken = true
@@ -277,6 +284,11 @@ func (k *kibana) kibanaCR() *kbv1.Kibana {
 	count := int32(1)
 	if k.cfg.Installation.ControlPlaneReplicas != nil {
 		count = *k.cfg.Installation.ControlPlaneReplicas
+	}
+
+	tolerations := k.cfg.Installation.ControlPlaneTolerations
+	if k.cfg.Installation.KubernetesProvider.IsGKE() {
+		tolerations = append(tolerations, rmeta.TolerateGKEARM64NoSchedule)
 	}
 
 	kibana := &kbv1.Kibana{
@@ -321,7 +333,7 @@ func (k *kibana) kibanaCR() *kbv1.Kibana {
 					ImagePullSecrets:             secret.GetReferenceList(k.cfg.PullSecrets),
 					ServiceAccountName:           ObjectName,
 					NodeSelector:                 k.cfg.Installation.ControlPlaneNodeSelector,
-					Tolerations:                  k.cfg.Installation.ControlPlaneTolerations,
+					Tolerations:                  tolerations,
 					InitContainers:               initContainers,
 					AutomountServiceAccountToken: &automountToken,
 					Containers: []corev1.Container{{

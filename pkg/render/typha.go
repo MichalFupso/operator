@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2019-2025 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -224,6 +224,12 @@ func (c *typhaComponent) typhaRole() *rbacv1.ClusterRole {
 				Verbs:     []string{"watch", "list"},
 			},
 			{
+				// For enforcing admin network policies.
+				APIGroups: []string{"policy.networking.k8s.io"},
+				Resources: []string{"adminnetworkpolicies", "baselineadminnetworkpolicies"},
+				Verbs:     []string{"watch", "list"},
+			},
+			{
 				// Metadata from these are used in conjunction with network policy.
 				APIGroups: []string{""},
 				Resources: []string{"pods", "namespaces", "serviceaccounts"},
@@ -247,12 +253,15 @@ func (c *typhaComponent) typhaRole() *rbacv1.ClusterRole {
 					"clusterinformations",
 					"felixconfigurations",
 					"globalnetworkpolicies",
+					"stagedglobalnetworkpolicies",
+					"networkpolicies",
+					"stagedkubernetesnetworkpolicies",
+					"stagednetworkpolicies",
 					"globalnetworksets",
 					"hostendpoints",
 					"ipamblocks",
 					"ippools",
 					"ipreservations",
-					"networkpolicies",
 					"networksets",
 					"tiers",
 				},
@@ -325,13 +334,11 @@ func (c *typhaComponent) typhaRole() *rbacv1.ClusterRole {
 				Resources: []string{
 					"licensekeys",
 					"remoteclusterconfigurations",
-					"stagedglobalnetworkpolicies",
-					"stagedkubernetesnetworkpolicies",
-					"stagednetworkpolicies",
 					"packetcaptures",
 					"deeppacketinspections",
 					"externalnetworks",
 					"egressgatewaypolicies",
+					"bfdconfigurations",
 				},
 				Verbs: []string{"get", "list", "watch"},
 			},
@@ -386,6 +393,9 @@ func (c *typhaComponent) typhaDeployment() *appsv1.Deployment {
 	tolerations := rmeta.TolerateAll
 	if len(c.cfg.Installation.ControlPlaneTolerations) != 0 {
 		tolerations = c.cfg.Installation.ControlPlaneTolerations
+	}
+	if c.cfg.Installation.KubernetesProvider.IsGKE() {
+		tolerations = append(tolerations, rmeta.TolerateGKEARM64NoSchedule)
 	}
 
 	d := appsv1.Deployment{
@@ -529,7 +539,6 @@ func (c *typhaComponent) typhaEnvVars() []corev1.EnvVar {
 		{Name: "TYPHA_CAFILE", Value: c.cfg.TLS.TrustedBundle.MountPath()},
 		{Name: "TYPHA_SERVERCERTFILE", Value: c.cfg.TLS.TyphaSecret.VolumeMountCertificateFilePath()},
 		{Name: "TYPHA_SERVERKEYFILE", Value: c.cfg.TLS.TyphaSecret.VolumeMountKeyFilePath()},
-		{Name: "TYPHA_FIPSMODEENABLED", Value: operatorv1.IsFIPSModeEnabledString(c.cfg.Installation.FIPSMode)},
 		{Name: shutdownTimeoutEnvVar, Value: fmt.Sprint(defaultTyphaTerminationGracePeriod)}, // May get overridden later.
 	}
 	// We need at least the CN or URISAN set, we depend on the validation

@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2019-2025 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -1010,6 +1010,24 @@ var _ = Describe("Testing core-controller installation", func() {
 			Expect(*fc.Spec.BPFEnabled).To(BeTrue())
 		})
 
+		It("should set BPFEnabled to true on FelixConfiguration on a fresh install in BPF Mode", func() {
+			network := operator.LinuxDataplaneBPF
+			cr.Spec.CalicoNetwork = &operator.CalicoNetworkSpec{LinuxDataplane: &network}
+			Expect(c.Create(ctx, cr)).NotTo(HaveOccurred())
+			_, err := r.Reconcile(ctx, reconcile.Request{})
+			Expect(err).ShouldNot(HaveOccurred())
+
+			fc := &crdv1.FelixConfiguration{}
+			err = c.Get(ctx, types.NamespacedName{Name: "default"}, fc)
+			Expect(err).ShouldNot(HaveOccurred())
+
+			// Should set correct annoation and BPFEnabled field.
+			Expect(fc.Annotations).NotTo(BeNil())
+			Expect(fc.Annotations[render.BPFOperatorAnnotation]).To(Equal("true"))
+			Expect(fc.Spec.BPFEnabled).NotTo(BeNil())
+			Expect(*fc.Spec.BPFEnabled).To(BeTrue())
+		})
+
 		It("should set BPFEnabled to false on FelixConfiguration if BPF is disabled on installation", func() {
 			createNodeDaemonSet()
 
@@ -1557,6 +1575,41 @@ var _ = Describe("Testing core-controller installation", func() {
 			Expect(c.List(ctx, &policies)).ToNot(HaveOccurred())
 			Expect(policies.Items).To(HaveLen(0))
 		})
+
+		It("should set default spec.Azure if provider is AKS", func() {
+			cr.Spec.KubernetesProvider = operator.ProviderAKS
+
+			Expect(c.Create(ctx, cr)).NotTo(HaveOccurred())
+			_, err := r.Reconcile(ctx, reconcile.Request{})
+			Expect(err).ShouldNot(HaveOccurred())
+
+			policyMode := operator.Default
+			azure := &operator.Azure{
+				PolicyMode: &policyMode,
+			}
+			instance := &operator.Installation{}
+
+			err = c.Get(ctx, types.NamespacedName{Name: "default"}, instance)
+			Expect(err).ShouldNot(HaveOccurred())
+
+			Expect(instance.Spec.Azure).NotTo(BeNil())
+			Expect(instance.Spec.Azure).To(Equal(azure))
+		})
+
+		It("should not set default spec.Azure if provider is not AKS", func() {
+			cr.Spec.KubernetesProvider = operator.ProviderEKS
+
+			Expect(c.Create(ctx, cr)).NotTo(HaveOccurred())
+			_, err := r.Reconcile(ctx, reconcile.Request{})
+			Expect(err).ShouldNot(HaveOccurred())
+
+			instance := &operator.Installation{}
+
+			err = c.Get(ctx, types.NamespacedName{Name: "default"}, instance)
+			Expect(err).ShouldNot(HaveOccurred())
+
+			Expect(instance.Spec.Azure).To(BeNil())
+		})
 	})
 
 	Context("Using EKS networking", func() {
@@ -1854,6 +1907,9 @@ func newFakeComponentHandler() *fakeComponentHandler {
 type fakeComponentHandler struct {
 	objectsToCreate []client.Object
 	objectsToDelete []client.Object
+}
+
+func (f *fakeComponentHandler) SetCreateOnly() {
 }
 
 func (f *fakeComponentHandler) CreateOrUpdateOrDelete(ctx context.Context, component render.Component, _ status.StatusManager) error {

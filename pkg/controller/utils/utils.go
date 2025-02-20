@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2020-2025 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -165,7 +165,7 @@ func AddDeploymentWatch(c ctrlruntime.Controller, name, namespace string) error 
 }
 
 func AddPeriodicReconcile(c ctrlruntime.Controller, period time.Duration, handler handler.EventHandler) error {
-	return c.Watch(&source.Channel{Source: createPeriodicReconcileChannel(period)}, handler)
+	return c.Watch(source.Channel(createPeriodicReconcileChannel(period), handler))
 }
 
 // AddSecretWatchWithLabel adds a secret watch for secrets with the given label in the given namespace.
@@ -409,6 +409,22 @@ func GetNetworkingPullSecrets(i *operatorv1.InstallationSpec, c client.Client) (
 	return secrets, nil
 }
 
+// Return the AplicationLayer CR if present. No error is returned if it was not
+// found.
+func GetApplicationLayer(ctx context.Context, c client.Client) (*operatorv1.ApplicationLayer, error) {
+	applicationLayer := &operatorv1.ApplicationLayer{}
+
+	err := c.Get(ctx, DefaultTSEEInstanceKey, applicationLayer)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return applicationLayer, nil
+}
+
 // Return the ManagementCluster CR if present. No error is returned if it was not found.
 func GetManagementCluster(ctx context.Context, c client.Client) (*operatorv1.ManagementCluster, error) {
 	managementCluster := &operatorv1.ManagementCluster{}
@@ -437,6 +453,21 @@ func GetManagementClusterConnection(ctx context.Context, c client.Client) (*oper
 	}
 
 	return managementClusterConnection, nil
+}
+
+// GetNonClusterHost finds the NonClusterHost CR in your cluster.
+func GetNonClusterHost(ctx context.Context, cli client.Client) (*operatorv1.NonClusterHost, error) {
+	nonclusterhost := &operatorv1.NonClusterHost{}
+
+	err := cli.Get(ctx, DefaultTSEEInstanceKey, nonclusterhost)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return nonclusterhost, nil
 }
 
 // GetAuthentication finds the authentication CR in your cluster.
@@ -865,12 +896,12 @@ func compareMap(m1, m2 map[string]string) bool {
 	return true
 }
 
-func IsDexDisabled(authentication *operatorv1.Authentication) bool {
-	disableDex := false
-	if authentication.Spec.OIDC != nil && authentication.Spec.OIDC.Type == operatorv1.OIDCTypeTigera {
-		disableDex = true
+func DexEnabled(authentication *operatorv1.Authentication) bool {
+	enableDex := authentication != nil
+	if enableDex && authentication.Spec.OIDC != nil && authentication.Spec.OIDC.Type == operatorv1.OIDCTypeTigera {
+		enableDex = false
 	}
-	return disableDex
+	return enableDex
 }
 
 func VerifySysctl(pluginData []operatorv1.Sysctl) error {

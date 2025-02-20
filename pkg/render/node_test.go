@@ -133,12 +133,14 @@ var _ = Describe("Node rendering tests", func() {
 
 				// Create a default configuration.
 				cfg = render.NodeConfiguration{
-					K8sServiceEp:    k8sServiceEp,
-					Installation:    defaultInstance,
-					TLS:             typhaNodeTLS,
-					ClusterDomain:   defaultClusterDomain,
-					FelixHealthPort: 9099,
-					IPPools:         defaultInstance.CalicoNetwork.IPPools,
+					K8sServiceEp:                  k8sServiceEp,
+					Installation:                  defaultInstance,
+					TLS:                           typhaNodeTLS,
+					ClusterDomain:                 defaultClusterDomain,
+					FelixHealthPort:               9099,
+					IPPools:                       defaultInstance.CalicoNetwork.IPPools,
+					FelixPrometheusMetricsEnabled: false,
+					FelixPrometheusMetricsPort:    9098,
 				}
 			})
 
@@ -236,7 +238,14 @@ var _ = Describe("Node rendering tests", func() {
 
 				// The DaemonSet should have the correct configuration.
 				ds := dsResource.(*appsv1.DaemonSet)
+
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 				rtest.ExpectEnv(ds.Spec.Template.Spec.Containers[0].Env, "NO_DEFAULT_POOLS", "true")
+
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
 
 				// Node image override results in correct image.
 				Expect(ds.Spec.Template.Spec.Containers).To(HaveLen(1))
@@ -327,7 +336,6 @@ var _ = Describe("Node rendering tests", func() {
 					{Name: "FELIX_TYPHACAFILE", Value: certificatemanagement.TrustedCertBundleMountPath},
 					{Name: "FELIX_TYPHACERTFILE", Value: "/node-certs/tls.crt"},
 					{Name: "FELIX_TYPHAKEYFILE", Value: "/node-certs/tls.key"},
-					{Name: "FIPS_MODE_ENABLED", Value: "false"},
 					{Name: "NO_DEFAULT_POOLS", Value: "true"},
 				}
 				expectedNodeEnv = configureExpectedNodeEnvIPVersions(expectedNodeEnv, defaultInstance, enableIPv4, enableIPv6)
@@ -504,6 +512,9 @@ var _ = Describe("Node rendering tests", func() {
 				// The DaemonSet should have the correct configuration.
 				ds := dsResource.(*appsv1.DaemonSet)
 
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 				rtest.ExpectEnv(ds.Spec.Template.Spec.Containers[0].Env, "NO_DEFAULT_POOLS", "true")
 
 				cniContainer := rtest.GetContainer(ds.Spec.Template.Spec.InitContainers, "install-cni")
@@ -570,7 +581,6 @@ var _ = Describe("Node rendering tests", func() {
 					{Name: "FELIX_TYPHACAFILE", Value: certificatemanagement.TrustedCertBundleMountPath},
 					{Name: "FELIX_TYPHACERTFILE", Value: "/node-certs/tls.crt"},
 					{Name: "FELIX_TYPHAKEYFILE", Value: "/node-certs/tls.key"},
-					{Name: "FIPS_MODE_ENABLED", Value: "false"},
 					{Name: "NO_DEFAULT_POOLS", Value: "true"},
 				}
 				expectedNodeEnv = configureExpectedNodeEnvIPVersions(expectedNodeEnv, defaultInstance, enableIPv4, enableIPv6)
@@ -777,6 +787,10 @@ var _ = Describe("Node rendering tests", func() {
 
 				// The DaemonSet should have the correct configuration.
 				ds := rtest.GetResource(resources, "calico-node", "calico-system", "apps", "v1", "DaemonSet").(*appsv1.DaemonSet)
+
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 				Expect(ds.Spec.Template.Spec.Containers[0].Image).To(Equal(components.TigeraRegistry + "tigera/cnx-node:" + components.ComponentTigeraNode.Version))
 				rtest.ExpectEnv(rtest.GetContainer(ds.Spec.Template.Spec.InitContainers, "install-cni").Env, "CNI_NET_DIR", "/etc/cni/net.d")
 
@@ -823,14 +837,53 @@ var _ = Describe("Node rendering tests", func() {
 					{Name: "FELIX_DNSLOGSFILEENABLED", Value: "true"},
 					{Name: "FELIX_DNSLOGSFILEPERNODELIMIT", Value: "1000"},
 					{Name: "MULTI_INTERFACE_MODE", Value: operatorv1.MultiInterfaceModeNone.Value()},
-					{Name: "FIPS_MODE_ENABLED", Value: "false"},
 					{Name: "NO_DEFAULT_POOLS", Value: "true"},
 				}
 				expectedNodeEnv = configureExpectedNodeEnvIPVersions(expectedNodeEnv, defaultInstance, enableIPv4, enableIPv6)
 				Expect(ds.Spec.Template.Spec.Containers[0].Env).To(ConsistOf(expectedNodeEnv))
 				Expect(len(ds.Spec.Template.Spec.Containers[0].Env)).To(Equal(len(expectedNodeEnv)))
 
+				//Expect 2 Ports when FelixPrometheusMetricsEnabled is false
+				ms := rtest.GetResource(resources, "calico-node-metrics", "calico-system", "", "v1", "Service").(*corev1.Service)
+				Expect(len(ms.Spec.Ports)).To(Equal(2))
+
 				verifyProbesAndLifecycle(ds, false, true)
+			})
+
+			It("should render felix service metric with FelixPrometheusMetricPort when FelixPrometheusMetricsEnabled is true", func() {
+
+				defaultInstance.Variant = operatorv1.TigeraSecureEnterprise
+				cfg.NodeReporterMetricsPort = 9081
+				cfg.FelixPrometheusMetricsEnabled = true
+
+				component := render.Node(&cfg)
+				Expect(component.ResolveImages(nil)).To(BeNil())
+				resources, _ := component.Objects()
+
+				expectedServicePorts := []corev1.ServicePort{
+					{
+						Name:       "calico-metrics-port",
+						Port:       int32(cfg.NodeReporterMetricsPort),
+						TargetPort: intstr.FromInt(cfg.NodeReporterMetricsPort),
+						Protocol:   corev1.ProtocolTCP,
+					},
+					{
+						Name:       "calico-bgp-metrics-port",
+						Port:       9900,
+						TargetPort: intstr.FromInt(int(9900)),
+						Protocol:   corev1.ProtocolTCP,
+					},
+					{
+						Name:       "felix-metrics-port",
+						Port:       9098,
+						TargetPort: intstr.FromInt(int(9098)),
+						Protocol:   corev1.ProtocolTCP,
+					},
+				}
+
+				//Expect 3 Ports when FelixPrometheusMetricsEnabled is true
+				ms := rtest.GetResource(resources, "calico-node-metrics", "calico-system", "", "v1", "Service").(*corev1.Service)
+				Expect(ms.Spec.Ports).To(Equal(expectedServicePorts))
 			})
 
 			It("should render all resources with the appropriate permissions when running as non-privileged", func() {
@@ -870,6 +923,10 @@ var _ = Describe("Node rendering tests", func() {
 
 				// The DaemonSet should have the correct security context.
 				ds := dsResource.(*appsv1.DaemonSet)
+
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 				nodeContainer := rtest.GetContainer(ds.Spec.Template.Spec.Containers, "calico-node")
 				Expect(nodeContainer).ToNot(BeNil())
 				Expect(nodeContainer.SecurityContext).ToNot(BeNil())
@@ -1064,6 +1121,9 @@ var _ = Describe("Node rendering tests", func() {
 				// The DaemonSet should have the correct configuration.
 				ds := dsResource.(*appsv1.DaemonSet)
 
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 				rtest.ExpectEnv(ds.Spec.Template.Spec.Containers[0].Env, "NO_DEFAULT_POOLS", "true")
 
 				cniContainer := rtest.GetContainer(ds.Spec.Template.Spec.InitContainers, "install-cni")
@@ -1109,7 +1169,6 @@ var _ = Describe("Node rendering tests", func() {
 					{Name: "FELIX_TYPHACAFILE", Value: certificatemanagement.TrustedCertBundleMountPath},
 					{Name: "FELIX_TYPHACERTFILE", Value: "/node-certs/tls.crt"},
 					{Name: "FELIX_TYPHAKEYFILE", Value: "/node-certs/tls.key"},
-					{Name: "FIPS_MODE_ENABLED", Value: "false"},
 					{Name: "NO_DEFAULT_POOLS", Value: "true"},
 				}
 				expectedNodeEnv = configureExpectedNodeEnvIPVersions(expectedNodeEnv, defaultInstance, enableIPv4, enableIPv6)
@@ -1228,6 +1287,9 @@ var _ = Describe("Node rendering tests", func() {
 				// The DaemonSet should have the correct configuration.
 				ds := dsResource.(*appsv1.DaemonSet)
 
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 				// CNI install container should not be present.
 				cniContainer := rtest.GetContainer(ds.Spec.Template.Spec.InitContainers, "install-cni")
 				Expect(cniContainer).To(BeNil())
@@ -1275,7 +1337,6 @@ var _ = Describe("Node rendering tests", func() {
 					{Name: "FELIX_ROUTESOURCE", Value: "WorkloadIPs"},
 					{Name: "FELIX_BPFEXTTOSERVICECONNMARK", Value: "0x80"},
 					{Name: "FELIX_WIREGUARDHOSTENCRYPTIONENABLED", Value: "true"},
-					{Name: "FIPS_MODE_ENABLED", Value: "false"},
 				}
 				Expect(ds.Spec.Template.Spec.Containers[0].Env).To(ConsistOf(expectedNodeEnv))
 
@@ -1360,6 +1421,9 @@ var _ = Describe("Node rendering tests", func() {
 
 					// The DaemonSet should have the correct configuration.
 					ds := dsResource.(*appsv1.DaemonSet)
+
+					// The pod template should have node critical priority
+					Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
 
 					// CNI install container should not be present.
 					cniContainer := rtest.GetContainer(ds.Spec.Template.Spec.InitContainers, "install-cni")
@@ -1477,6 +1541,9 @@ var _ = Describe("Node rendering tests", func() {
 				// The DaemonSet should have the correct configuration.
 				ds := dsResource.(*appsv1.DaemonSet)
 
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 				rtest.ExpectEnv(ds.Spec.Template.Spec.Containers[0].Env, "NO_DEFAULT_POOLS", "true")
 
 				cniContainer := rtest.GetContainer(ds.Spec.Template.Spec.InitContainers, "install-cni")
@@ -1522,7 +1589,6 @@ var _ = Describe("Node rendering tests", func() {
 					{Name: "FELIX_TYPHACAFILE", Value: certificatemanagement.TrustedCertBundleMountPath},
 					{Name: "FELIX_TYPHACERTFILE", Value: "/node-certs/tls.crt"},
 					{Name: "FELIX_TYPHAKEYFILE", Value: "/node-certs/tls.key"},
-					{Name: "FIPS_MODE_ENABLED", Value: "false"},
 					{Name: "NO_DEFAULT_POOLS", Value: "true"},
 				}
 				expectedNodeEnv = configureExpectedNodeEnvIPVersions(expectedNodeEnv, defaultInstance, enableIPv4, enableIPv6)
@@ -1638,6 +1704,9 @@ var _ = Describe("Node rendering tests", func() {
 				// The DaemonSet should have the correct configuration.
 				ds := dsResource.(*appsv1.DaemonSet)
 
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 				// CNI install container should not be present.
 				cniContainer := rtest.GetContainer(ds.Spec.Template.Spec.InitContainers, "install-cni")
 				Expect(cniContainer).To(BeNil())
@@ -1685,7 +1754,6 @@ var _ = Describe("Node rendering tests", func() {
 					{Name: "FELIX_ROUTESOURCE", Value: "WorkloadIPs"},
 					{Name: "FELIX_BPFEXTTOSERVICECONNMARK", Value: "0x80"},
 					{Name: "FELIX_WIREGUARDHOSTENCRYPTIONENABLED", Value: "true"},
-					{Name: "FIPS_MODE_ENABLED", Value: "false"},
 				}
 				Expect(ds.Spec.Template.Spec.Containers[0].Env).To(ConsistOf(expectedNodeEnv))
 
@@ -1790,6 +1858,9 @@ var _ = Describe("Node rendering tests", func() {
 				ds := rtest.GetResource(resources, "calico-node", "calico-system", "apps", "v1", "DaemonSet").(*appsv1.DaemonSet)
 				Expect(ds.Spec.Template.Spec.Containers[0].Image).To(Equal(fmt.Sprintf("docker.io/%s:%s", components.ComponentCalicoNode.Image, components.ComponentCalicoNode.Version)))
 
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 				rtest.ExpectEnv(rtest.GetContainer(ds.Spec.Template.Spec.InitContainers, "install-cni").Env, "CNI_NET_DIR", "/var/run/multus/cni/net.d")
 
 				// Verify volumes. In particular, we want to make sure the flexvol-driver-host volume uses the right
@@ -1856,7 +1927,6 @@ var _ = Describe("Node rendering tests", func() {
 					{Name: "FELIX_TYPHACAFILE", Value: certificatemanagement.TrustedCertBundleMountPath},
 					{Name: "FELIX_TYPHACERTFILE", Value: "/node-certs/tls.crt"},
 					{Name: "FELIX_TYPHAKEYFILE", Value: "/node-certs/tls.key"},
-					{Name: "FIPS_MODE_ENABLED", Value: "false"},
 					{Name: "NO_DEFAULT_POOLS", Value: "true"},
 				}
 				expectedNodeEnv = configureExpectedNodeEnvIPVersions(expectedNodeEnv, defaultInstance, enableIPv4, enableIPv6)
@@ -1915,6 +1985,9 @@ var _ = Describe("Node rendering tests", func() {
 				ds := rtest.GetResource(resources, "calico-node", "calico-system", "apps", "v1", "DaemonSet").(*appsv1.DaemonSet)
 				Expect(ds.Spec.Template.Spec.Containers[0].Image).To(Equal(components.TigeraRegistry + "tigera/cnx-node:" + components.ComponentTigeraNode.Version))
 
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 				rtest.ExpectEnv(rtest.GetContainer(ds.Spec.Template.Spec.InitContainers, "install-cni").Env, "CNI_NET_DIR", "/var/run/multus/cni/net.d")
 
 				// Verify the Flex volume container image.
@@ -1960,7 +2033,6 @@ var _ = Describe("Node rendering tests", func() {
 					{Name: "FELIX_DNSLOGSFILEENABLED", Value: "true"},
 					{Name: "FELIX_DNSLOGSFILEPERNODELIMIT", Value: "1000"},
 					{Name: "MULTI_INTERFACE_MODE", Value: operatorv1.MultiInterfaceModeNone.Value()},
-					{Name: "FIPS_MODE_ENABLED", Value: "false"},
 					{Name: "NO_DEFAULT_POOLS", Value: "true"},
 				}
 				expectedNodeEnv = configureExpectedNodeEnvIPVersions(expectedNodeEnv, defaultInstance, enableIPv4, enableIPv6)
@@ -2010,6 +2082,9 @@ var _ = Describe("Node rendering tests", func() {
 				ds := rtest.GetResource(resources, "calico-node", "calico-system", "apps", "v1", "DaemonSet").(*appsv1.DaemonSet)
 				Expect(ds.Spec.Template.Spec.Containers[0].Image).To(Equal(components.TigeraRegistry + "tigera/cnx-node:" + components.ComponentTigeraNode.Version))
 
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 				rtest.ExpectEnv(rtest.GetContainer(ds.Spec.Template.Spec.InitContainers, "install-cni").Env, "CNI_NET_DIR", "/etc/cni/net.d")
 
 				expectedNodeEnv := []corev1.EnvVar{
@@ -2055,7 +2130,6 @@ var _ = Describe("Node rendering tests", func() {
 
 					// The RKE2 envvar overrides.
 					{Name: "MULTI_INTERFACE_MODE", Value: operatorv1.MultiInterfaceModeNone.Value()},
-					{Name: "FIPS_MODE_ENABLED", Value: "false"},
 				}
 				expectedNodeEnv = configureExpectedNodeEnvIPVersions(expectedNodeEnv, defaultInstance, enableIPv4, enableIPv6)
 				Expect(ds.Spec.Template.Spec.Containers[0].Env).To(ConsistOf(expectedNodeEnv))
@@ -2105,6 +2179,10 @@ var _ = Describe("Node rendering tests", func() {
 
 				// The DaemonSet should have the correct configuration.
 				ds := rtest.GetResource(resources, "calico-node", "calico-system", "apps", "v1", "DaemonSet").(*appsv1.DaemonSet)
+
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 				volumes := ds.Spec.Template.Spec.Volumes
 				// Expect(ds.Spec.Template.Spec.Volumes).To(Equal())
 				Expect(volumes).To(ContainElement(
@@ -2139,6 +2217,10 @@ var _ = Describe("Node rendering tests", func() {
 
 					// The DaemonSet should have the correct configuration.
 					ds := dsResource.(*appsv1.DaemonSet)
+
+					// The pod template should have node critical priority
+					Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 					Expect(ds.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms).To(ContainElement(
 						corev1.NodeSelectorTerm{
 							MatchExpressions: []corev1.NodeSelectorRequirement{{
@@ -2161,6 +2243,10 @@ var _ = Describe("Node rendering tests", func() {
 
 					// The DaemonSet should have the correct configuration.
 					ds := dsResource.(*appsv1.DaemonSet)
+
+					// The pod template should have node critical priority
+					Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 					Expect(ds.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms).To(ContainElement(
 						corev1.NodeSelectorTerm{
 							MatchExpressions: []corev1.NodeSelectorRequirement{{
@@ -2202,6 +2288,10 @@ var _ = Describe("Node rendering tests", func() {
 
 					// The DaemonSet should have the correct configuration.
 					ds := dsResource.(*appsv1.DaemonSet)
+
+					// The pod template should have node critical priority
+					Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 					rtest.ExpectEnv(ds.Spec.Template.Spec.Containers[0].Env, "IP_AUTODETECTION_METHOD", "interface=eth*")
 				})
 
@@ -2218,6 +2308,10 @@ var _ = Describe("Node rendering tests", func() {
 
 					// The DaemonSet should have the correct configuration.
 					ds := dsResource.(*appsv1.DaemonSet)
+
+					// The pod template should have node critical priority
+					Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 					rtest.ExpectEnv(ds.Spec.Template.Spec.Containers[0].Env, "IP_AUTODETECTION_METHOD", "skip-interface=eth*")
 				})
 
@@ -2234,6 +2328,10 @@ var _ = Describe("Node rendering tests", func() {
 
 					// The DaemonSet should have the correct configuration.
 					ds := dsResource.(*appsv1.DaemonSet)
+
+					// The pod template should have node critical priority
+					Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 					rtest.ExpectEnv(ds.Spec.Template.Spec.Containers[0].Env, "IP_AUTODETECTION_METHOD", "cidr=10.0.1.0/24,10.0.2.0/24")
 				})
 			})
@@ -2269,6 +2367,10 @@ var _ = Describe("Node rendering tests", func() {
 
 				// The DaemonSet should have the correct configuration.
 				ds := dsResource.(*appsv1.DaemonSet)
+
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 				ns := ds.Spec.Template.Spec.NodeSelector
 				Expect(ns).To(HaveKey("projectcalico.org/operator-node-migration"))
 				Expect(ns["projectcalico.org/operator-node-migration"]).To(Equal("migrated"))
@@ -2450,6 +2552,9 @@ var _ = Describe("Node rendering tests", func() {
 
 				// The DaemonSet should have the correct configuration.
 				ds := rtest.GetResource(resources, "calico-node", "calico-system", "apps", "v1", "DaemonSet").(*appsv1.DaemonSet)
+
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
 
 				cniContainer := rtest.GetContainer(ds.Spec.Template.Spec.InitContainers, "install-cni")
 				rtest.ExpectEnv(cniContainer.Env, "CNI_NET_DIR", "/etc/cni/net.d")
@@ -3042,6 +3147,10 @@ var _ = Describe("Node rendering tests", func() {
 
 				// The DaemonSet should have the correct configuration.
 				ds := dsResource.(*appsv1.DaemonSet)
+
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 				rtest.ExpectEnv(ds.Spec.Template.Spec.Containers[0].Env, "NO_DEFAULT_POOLS", "true")
 
 				cniContainer := rtest.GetContainer(ds.Spec.Template.Spec.InitContainers, "install-cni")
@@ -3071,7 +3180,6 @@ var _ = Describe("Node rendering tests", func() {
 					{Name: "FELIX_DEFAULTENDPOINTTOHOSTACTION", Value: "ACCEPT"},
 					{Name: "FELIX_HEALTHENABLED", Value: "true"},
 					{Name: "FELIX_HEALTHPORT", Value: "9099"},
-					{Name: "FIPS_MODE_ENABLED", Value: "false"},
 					{
 						Name: "NODENAME",
 						ValueFrom: &corev1.EnvVarSource{
@@ -3286,33 +3394,6 @@ var _ = Describe("Node rendering tests", func() {
 				rtest.ExpectEnv(deploy.Spec.Template.Spec.Containers[0].Env, "CALICO_EARLY_NETWORKING", render.BGPLayoutPath)
 			})
 
-			It("should render the correct env and/or images when FIPS mode is enabled (EE)", func() {
-				fipsEnabled := operatorv1.FIPSModeEnabled
-				cfg.Installation.FIPSMode = &fipsEnabled
-				cfg.Installation.Variant = operatorv1.TigeraSecureEnterprise
-				cfg.Installation.NodeMetricsPort = ptr.Int32ToPtr(123)
-
-				certificateManager, err := certificatemanager.Create(cli, nil, clusterDomain, common.OperatorNamespace(), certificatemanager.AllowCACreation())
-				Expect(err).NotTo(HaveOccurred())
-
-				cfg.PrometheusServerTLS = certificateManager.KeyPair()
-				component := render.Node(&cfg)
-				Expect(component.ResolveImages(nil)).To(BeNil())
-
-				resources, _ := component.Objects()
-				nodeDSObj := rtest.GetResource(resources, common.NodeDaemonSetName, common.CalicoNamespace, "apps", "v1", "DaemonSet")
-				Expect(nodeDSObj).ToNot(BeNil())
-
-				nodeDS, ok := nodeDSObj.(*appsv1.DaemonSet)
-				Expect(ok).To(BeTrue())
-
-				Expect(nodeDS.Spec.Template.Spec.Containers[0].Name).To(Equal("calico-node"))
-				Expect(nodeDS.Spec.Template.Spec.Containers[0].Env).To(ContainElement(corev1.EnvVar{Name: "FIPS_MODE_ENABLED", Value: "true"}))
-
-				Expect(nodeDS.Spec.Template.Spec.InitContainers[1].Name).To(Equal("install-cni"))
-				Expect(nodeDS.Spec.Template.Spec.InitContainers[1].Image).To(ContainSubstring("-fips"))
-			})
-
 			It("should render the correct env and/or images when FIPS mode is enabled (OSS)", func() {
 				fipsEnabled := operatorv1.FIPSModeEnabled
 				cfg.Installation.FIPSMode = &fipsEnabled
@@ -3334,7 +3415,6 @@ var _ = Describe("Node rendering tests", func() {
 				Expect(ok).To(BeTrue())
 
 				Expect(nodeDS.Spec.Template.Spec.Containers[0].Name).To(Equal("calico-node"))
-				Expect(nodeDS.Spec.Template.Spec.Containers[0].Env).To(ContainElement(corev1.EnvVar{Name: "FIPS_MODE_ENABLED", Value: "true"}))
 				Expect(nodeDS.Spec.Template.Spec.Containers[0].Image).To(ContainSubstring("-fips"))
 
 				Expect(nodeDS.Spec.Template.Spec.InitContainers[1].Name).To(Equal("install-cni"))

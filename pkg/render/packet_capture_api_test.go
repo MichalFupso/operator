@@ -95,25 +95,18 @@ var _ = Describe("Rendering tests for PacketCapture API component", func() {
 		return resources
 	}
 
-	type expectedResource struct {
-		name    string
-		ns      string
-		group   string
-		version string
-		kind    string
-	}
 	// Generate expected resources
-	expectedResources := func(useCSR, enableOIDC bool) []expectedResource {
-		resources := []expectedResource{
-			{name: render.PacketCaptureNamespace, ns: "", group: "", version: "v1", kind: "Namespace"},
-			{name: "pull-secret", ns: render.PacketCaptureNamespace, group: "", version: "v1", kind: "Secret"},
-			{name: render.PacketCaptureServiceAccountName, ns: render.PacketCaptureNamespace, group: "", version: "v1", kind: "ServiceAccount"},
-			{name: render.PacketCaptureClusterRoleName, ns: "", group: "rbac.authorization.k8s.io", version: "v1", kind: "ClusterRole"},
-			{name: render.PacketCaptureClusterRoleBindingName, ns: "", group: "rbac.authorization.k8s.io", version: "v1", kind: "ClusterRoleBinding"},
-			{name: render.PacketCaptureDeploymentName, ns: render.PacketCaptureNamespace, group: "apps", version: "v1", kind: "Deployment"},
-			{name: render.PacketCaptureServiceName, ns: render.PacketCaptureNamespace, group: "", version: "v1", kind: "Service"},
+	expectedResources := func(useCSR, enableOIDC bool) []client.Object {
+		resources := []client.Object{
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: render.PacketCaptureNamespace}, TypeMeta: metav1.TypeMeta{Kind: "Namespace", APIVersion: "v1"}},
+			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "pull-secret", Namespace: render.PacketCaptureNamespace}, TypeMeta: metav1.TypeMeta{Kind: "Secret", APIVersion: "v1"}},
+			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: render.PacketCaptureServiceAccountName, Namespace: render.PacketCaptureNamespace}, TypeMeta: metav1.TypeMeta{Kind: "ServiceAccount", APIVersion: "v1"}},
+			&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: render.PacketCaptureClusterRoleName}, TypeMeta: metav1.TypeMeta{Kind: "ClusterRole", APIVersion: "rbac.authorization.k8s.io/v1"}},
+			&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.PacketCaptureClusterRoleBindingName}, TypeMeta: metav1.TypeMeta{Kind: "ClusterRoleBinding", APIVersion: "rbac.authorization.k8s.io/v1"}},
+			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: render.PacketCaptureDeploymentName, Namespace: render.PacketCaptureNamespace}, TypeMeta: metav1.TypeMeta{Kind: "Deployment", APIVersion: "apps/v1"}},
+			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: render.PacketCaptureServiceName, Namespace: render.PacketCaptureNamespace}, TypeMeta: metav1.TypeMeta{Kind: "Service", APIVersion: "v1"}},
+			&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.TigeraOperatorSecrets, Namespace: render.PacketCaptureNamespace}},
 		}
-
 		return resources
 	}
 
@@ -128,11 +121,6 @@ var _ = Describe("Rendering tests for PacketCapture API component", func() {
 			{
 				Name:  "PACKETCAPTURE_API_HTTPS_CERT",
 				Value: "/tigera-packetcapture-server-tls/tls.crt",
-			},
-			{
-				Name:      "PACKETCAPTURE_API_FIPS_MODE_ENABLED",
-				Value:     "false",
-				ValueFrom: nil,
 			},
 		}
 
@@ -272,10 +260,9 @@ var _ = Describe("Rendering tests for PacketCapture API component", func() {
 	}
 
 	checkPacketCaptureResources := func(resources []client.Object, useCSR, enableOIDC bool) {
-		for i, expectedRes := range expectedResources(useCSR, enableOIDC) {
-			rtest.ExpectResourceTypeAndObjectMetadata(resources[i], expectedRes.name, expectedRes.ns, expectedRes.group, expectedRes.version, expectedRes.kind)
-		}
-		Expect(len(resources)).To(Equal(len(expectedResources(useCSR, enableOIDC))))
+		expectedResources := expectedResources(useCSR, enableOIDC)
+
+		rtest.ExpectResources(resources, expectedResources)
 
 		// Check the namespace.
 		namespace := rtest.GetResource(resources, render.PacketCaptureNamespace, "", "", "v1", "Namespace").(*corev1.Namespace)
@@ -370,6 +357,20 @@ var _ = Describe("Rendering tests for PacketCapture API component", func() {
 		deployment := rtest.GetResource(resources, render.PacketCaptureDeploymentName, render.PacketCaptureNamespace, "apps", "v1", "Deployment").(*appsv1.Deployment)
 		Expect(deployment).NotTo(BeNil())
 		Expect(deployment.Spec.Template.Spec.Tolerations).Should(ContainElements(append(rmeta.TolerateCriticalAddonsAndControlPlane, t)))
+	})
+
+	It("should render toleration on GKE", func() {
+		resources := renderPacketCapture(operatorv1.InstallationSpec{
+			KubernetesProvider: operatorv1.ProviderGKE,
+		}, nil)
+		deployment := rtest.GetResource(resources, render.PacketCaptureDeploymentName, render.PacketCaptureNamespace, "apps", "v1", "Deployment").(*appsv1.Deployment)
+		Expect(deployment).NotTo(BeNil())
+		Expect(deployment.Spec.Template.Spec.Tolerations).To(ContainElements(corev1.Toleration{
+			Key:      "kubernetes.io/arch",
+			Operator: corev1.TolerationOpEqual,
+			Value:    "arm64",
+			Effect:   corev1.TaintEffectNoSchedule,
+		}))
 	})
 
 	It("should render SecurityContextConstrains properly when provider is OpenShift", func() {

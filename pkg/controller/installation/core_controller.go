@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2019-2025 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -89,6 +89,8 @@ const (
 	// The default port used by calico/node to report Calico Enterprise internal metrics.
 	// This is separate from the calico/node prometheus metrics port, which is user configurable.
 	defaultNodeReporterPort = 9081
+
+	defaultFelixMetricsDefaultPort = 9091
 )
 
 const InstallationName string = "calico"
@@ -721,6 +723,11 @@ func fillDefaults(instance *operator.Installation, currentPools *crdv1.IPPoolLis
 		instance.Spec.NodeUpdateStrategy.Type = appsv1.RollingUpdateDaemonSetStrategyType
 	}
 
+	if instance.Spec.KubernetesProvider == operator.ProviderAKS && instance.Spec.Azure == nil {
+		defaultPolicyMode := operator.Default
+		instance.Spec.Azure = &operator.Azure{PolicyMode: &defaultPolicyMode}
+	}
+
 	return nil
 }
 
@@ -1135,17 +1142,23 @@ func (r *ReconcileInstallation) Reconcile(ctx context.Context, request reconcile
 	nodeReporterMetricsPort := defaultNodeReporterPort
 	var nodePrometheusTLS certificatemanagement.KeyPairInterface
 	calicoVersion := components.CalicoRelease
+
+	felixPrometheusMetricsPort := defaultFelixMetricsDefaultPort
+
 	if instance.Spec.Variant == operator.TigeraSecureEnterprise {
 
 		// Determine the port to use for nodeReporter metrics.
 		if felixConfiguration.Spec.PrometheusReporterPort != nil {
 			nodeReporterMetricsPort = *felixConfiguration.Spec.PrometheusReporterPort
 		}
-
 		if nodeReporterMetricsPort == 0 {
 			err := errors.New("felixConfiguration prometheusReporterPort=0 not supported")
 			r.status.SetDegraded(operator.InvalidConfigurationError, "invalid metrics port", err, reqLogger)
 			return reconcile.Result{}, err
+		}
+
+		if felixConfiguration.Spec.PrometheusMetricsPort != nil {
+			felixPrometheusMetricsPort = *felixConfiguration.Spec.PrometheusMetricsPort
 		}
 
 		nodePrometheusTLS, err = certificateManager.GetOrCreateKeyPair(r.client, render.NodePrometheusTLSServerSecret, common.OperatorNamespace(), dns.GetServiceDNSNames(render.CalicoNodeMetricsService, common.CalicoNamespace, r.clusterDomain))
@@ -1349,21 +1362,23 @@ func (r *ReconcileInstallation) Reconcile(ctx context.Context, request reconcile
 
 	// Build a configuration for rendering calico/node.
 	nodeCfg := render.NodeConfiguration{
-		K8sServiceEp:            k8sapi.Endpoint,
-		Installation:            &instance.Spec,
-		IPPools:                 crdPoolsToOperator(currentPools.Items),
-		LogCollector:            logCollector,
-		BirdTemplates:           birdTemplates,
-		TLS:                     typhaNodeTLS,
-		ClusterDomain:           r.clusterDomain,
-		NodeReporterMetricsPort: nodeReporterMetricsPort,
-		BGPLayouts:              bgpLayout,
-		NodeAppArmorProfile:     nodeAppArmorProfile,
-		MigrateNamespaces:       needNsMigration,
-		CanRemoveCNIFinalizer:   canRemoveCNI,
-		PrometheusServerTLS:     nodePrometheusTLS,
-		FelixHealthPort:         *felixConfiguration.Spec.HealthPort,
-		BindMode:                bgpConfiguration.Spec.BindMode,
+		K8sServiceEp:                  k8sapi.Endpoint,
+		Installation:                  &instance.Spec,
+		IPPools:                       crdPoolsToOperator(currentPools.Items),
+		LogCollector:                  logCollector,
+		BirdTemplates:                 birdTemplates,
+		TLS:                           typhaNodeTLS,
+		ClusterDomain:                 r.clusterDomain,
+		NodeReporterMetricsPort:       nodeReporterMetricsPort,
+		BGPLayouts:                    bgpLayout,
+		NodeAppArmorProfile:           nodeAppArmorProfile,
+		MigrateNamespaces:             needNsMigration,
+		CanRemoveCNIFinalizer:         canRemoveCNI,
+		PrometheusServerTLS:           nodePrometheusTLS,
+		FelixHealthPort:               *felixConfiguration.Spec.HealthPort,
+		BindMode:                      bgpConfiguration.Spec.BindMode,
+		FelixPrometheusMetricsEnabled: utils.IsFelixPrometheusMetricsEnabled(felixConfiguration),
+		FelixPrometheusMetricsPort:    felixPrometheusMetricsPort,
 	}
 	components = append(components, render.Node(&nodeCfg))
 
@@ -1635,7 +1650,7 @@ func getOrCreateTyphaNodeTLSConfig(cli client.Client, certificateManager certifi
 		}
 	}
 	if len(errMsgs) != 0 {
-		return nil, fmt.Errorf(strings.Join(errMsgs, ";"))
+		return nil, fmt.Errorf("%s", strings.Join(errMsgs, ";"))
 	}
 	return &render.TyphaNodeTLS{
 		TrustedBundle:   trustedBundle,
@@ -1777,13 +1792,21 @@ func (r *ReconcileInstallation) setDefaultsOnFelixConfiguration(ctx context.Cont
 	// FelixConfiguration has the correct value set.
 
 	// If calico-node daemonset exists, we need to check the ENV VAR and set FelixConfiguration accordingly.
-	// Otherwise, just move on.
+	// Otherwise, this is a fresh install in eBPF mode, set the felix config.
 	ds := &appsv1.DaemonSet{}
 	err := r.client.Get(ctx, types.NamespacedName{Namespace: common.CalicoNamespace, Name: common.NodeDaemonSetName}, ds)
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			reqLogger.Error(err, "An error occurred when getting the Daemonset resource")
 			return false, err
+		}
+		if install.Spec.BPFEnabled() {
+			err = setBPFEnabledOnFelixConfiguration(fc, true)
+			if err != nil {
+				reqLogger.Error(err, "Unable to enable eBPF data plane with a fresh install")
+				return false, err
+			}
+			updated = true
 		}
 	} else {
 		bpfEnabledOnDaemonsetWithEnvVar, err := bpfEnabledOnDaemonsetWithEnvVar(ds)

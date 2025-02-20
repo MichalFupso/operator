@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2020-2025 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
+	"strings"
 	"sync"
 
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -32,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -45,6 +48,16 @@ import (
 
 type ComponentHandler interface {
 	CreateOrUpdateOrDelete(context.Context, render.Component, status.StatusManager) error
+
+	// Set this component handler to "create only" operation - i.e. it only creates resources if
+	// they do not already exist, and never tries to correct existing resources.
+	//
+	// When a component handler is "create only", and some of the objects that it is asked to
+	// create already exist, but no other error occurs, the CreateOrUpdateOrDelete() method will
+	// return an error that satisfies `errors.IsAlreadyExists`.  If a more serious error occurs,
+	// the method will return that more serious error instead.  If none of the objects already
+	// exist, and no other errors occur, the method will return nil.
+	SetCreateOnly()
 }
 
 // cr is allowed to be nil in the case we don't want to put ownership on a resource,
@@ -59,13 +72,18 @@ func NewComponentHandler(log logr.Logger, client client.Client, scheme *runtime.
 }
 
 type componentHandler struct {
-	client client.Client
-	scheme *runtime.Scheme
-	cr     metav1.Object
-	log    logr.Logger
+	client     client.Client
+	scheme     *runtime.Scheme
+	cr         metav1.Object
+	log        logr.Logger
+	createOnly bool
 }
 
-func (c componentHandler) createOrUpdateObject(ctx context.Context, obj client.Object, osType rmeta.OSType) error {
+func (c *componentHandler) SetCreateOnly() {
+	c.createOnly = true
+}
+
+func (c *componentHandler) createOrUpdateObject(ctx context.Context, obj client.Object, osType rmeta.OSType) error {
 	om, ok := obj.(metav1.ObjectMetaAccessor)
 	if !ok {
 		return fmt.Errorf("object is not ObjectMetaAccessor")
@@ -99,6 +117,9 @@ func (c componentHandler) createOrUpdateObject(ctx context.Context, obj client.O
 
 	// Make sure any objects with images also have an image pull policy.
 	modifyPodSpec(obj, setImagePullPolicy)
+	// Order volumes and volume mounts
+	modifyPodSpec(obj, orderVolumes)
+	modifyPodSpec(obj, orderVolumeMounts)
 
 	// Modify Liveness and Readiness probe default values if they are not set for this object.
 	setProbeTimeouts(obj)
@@ -132,6 +153,18 @@ func (c componentHandler) createOrUpdateObject(ctx context.Context, obj client.O
 			return err
 		}
 		return nil
+	}
+
+	if c.createOnly {
+		// This component handler only creates resources if they do not already exist.
+		logCtx.Info("Create-only operation, ignoring existing object")
+		return errors.NewAlreadyExists(
+			schema.GroupResource{
+				Group:    obj.GetObjectKind().GroupVersionKind().Group,
+				Resource: obj.GetObjectKind().GroupVersionKind().Kind,
+			},
+			obj.GetName(),
+		)
 	}
 
 	// The object exists. Update it, unless the user has marked it as "ignored".
@@ -249,7 +282,7 @@ func resetMetadataForCreate(obj client.Object) {
 	obj.SetCreationTimestamp(metav1.Time{})
 }
 
-func (c componentHandler) CreateOrUpdateOrDelete(ctx context.Context, component render.Component, status status.StatusManager) error {
+func (c *componentHandler) CreateOrUpdateOrDelete(ctx context.Context, component render.Component, status status.StatusManager) error {
 	// Before creating the component, make sure that it is ready. This provides a hook to do
 	// dependency checking for the component.
 	cmpLog := c.log.WithValues("component", reflect.TypeOf(component))
@@ -270,22 +303,30 @@ func (c componentHandler) CreateOrUpdateOrDelete(ctx context.Context, component 
 	objsToCreate, objsToDelete := component.Objects()
 	osType := component.SupportedOSType()
 
+	var alreadyExistsErr error = nil
+
 	for _, obj := range objsToCreate {
 		key := client.ObjectKeyFromObject(obj)
 
 		// Pass in a DeepCopy so any modifications made by createOrUpdateObject won't be included
 		// if we need to retry the function
+		alreadyRetriedConflict := false
+	conflictRetry:
 		err := c.createOrUpdateObject(ctx, obj.DeepCopyObject().(client.Object), osType)
-		if err != nil && errors.IsConflict(err) {
-			// If the error is a resource Conflict, try the update again
-			cmpLog.WithValues("key", key, "conflict_message", err).Info("Failed to update object, retrying.")
-			err = c.createOrUpdateObject(ctx, obj, osType)
-			if err != nil {
+		if err != nil {
+			if errors.IsAlreadyExists(err) {
+				// Remember that we've had an "already exists" error, but otherwise
+				// carry on.
+				alreadyExistsErr = err
+			} else if errors.IsConflict(err) && !alreadyRetriedConflict {
+				// If the error is a resource Conflict, try the update again.
+				cmpLog.WithValues("key", key, "conflict_message", err).Info("Failed to update object, retrying.")
+				alreadyRetriedConflict = true
+				goto conflictRetry
+			} else {
+				cmpLog.Error(err, "Failed to create or update object", "key", key)
 				return err
 			}
-		} else if err != nil {
-			cmpLog.Error(err, "Failed to create or update object", "key", key)
-			return err
 		}
 
 		// Keep track of some objects so we can report on their status.
@@ -347,7 +388,10 @@ func (c componentHandler) CreateOrUpdateOrDelete(ctx context.Context, component 
 	if status != nil {
 		status.ReadyToMonitor()
 	}
-	return nil
+
+	// alreadyExistsErr is only non-nil if this component handler is in "create only" mode and
+	// one (or more) of objsToCreate already existed.
+	return alreadyExistsErr
 }
 
 // skipAddingOwnerReference returns true if owner is a namespaced resource and
@@ -426,8 +470,18 @@ func mergeState(desired client.Object, current runtime.Object) client.Object {
 		cj := current.(*batchv1.Job)
 		dj := desired.(*batchv1.Job)
 
-		// We're only comparing jobs based off of annotations for now so we can send a signal to recreate a job. Later
-		// we might want to have some better comparison of jobs so that a changed in the container spec would trigger
+		if len(cj.Spec.Template.Spec.Containers) != len(dj.Spec.Template.Spec.Containers) {
+			return dj
+		}
+
+		for i := range cj.Spec.Template.Spec.Containers {
+			if cj.Spec.Template.Spec.Containers[i].Image != dj.Spec.Template.Spec.Containers[i].Image {
+				return dj
+			}
+		}
+
+		// We're only comparing jobs based off of annotations and containers images for now so we can send a signal to recreate a job.
+		// Later we might want to have some better comparison of jobs so that a changed in the container spec would trigger
 		// a recreation of the job
 		if reflect.DeepEqual(cj.Spec.Template.Annotations, dj.Spec.Template.Annotations) {
 			return nil
@@ -589,6 +643,20 @@ func setImagePullPolicy(podSpec *v1.PodSpec) {
 	}
 }
 
+func orderVolumes(podSpec *v1.PodSpec) {
+	slices.SortFunc(podSpec.Volumes, func(a, b v1.Volume) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+}
+
+func orderVolumeMounts(podSpec *v1.PodSpec) {
+	for _, container := range podSpec.Containers {
+		slices.SortFunc(container.VolumeMounts, func(a, b v1.VolumeMount) int {
+			return strings.Compare(a.Name, b.Name)
+		})
+	}
+}
+
 // ensureOSSchedulingRestrictions ensures that if obj is a type that creates pods and if osType is not OSTypeAny that a
 // node selector is set on the pod template for the "kubernetes.io/os" label to ensure that the pod is scheduled
 // on a node running an operating system as specified by osType.
@@ -741,8 +809,12 @@ func setStandardSelectorAndLabels(obj client.Object) {
 	if podTemplate.ObjectMeta.Labels == nil {
 		podTemplate.ObjectMeta.Labels = make(map[string]string)
 	}
-	podTemplate.ObjectMeta.Labels["k8s-app"] = name
-	podTemplate.ObjectMeta.Labels["app.kubernetes.io/name"] = name
+	if podTemplate.ObjectMeta.Labels["k8s-app"] == "" {
+		podTemplate.ObjectMeta.Labels["k8s-app"] = name
+	}
+	if podTemplate.ObjectMeta.Labels["app.kubernetes.io/name"] == "" {
+		podTemplate.ObjectMeta.Labels["app.kubernetes.io/name"] = name
+	}
 }
 
 // ReadyFlag is used to synchronize access to a boolean flag

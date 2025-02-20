@@ -18,19 +18,22 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/types"
 
-	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
-	operatorv1 "github.com/tigera/operator/api/v1"
-	rtest "github.com/tigera/operator/pkg/render/common/test"
-	"github.com/tigera/operator/pkg/render/logstorage/eck"
-	"github.com/tigera/operator/pkg/render/testutils"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
+
+	operatorv1 "github.com/tigera/operator/api/v1"
+	"github.com/tigera/operator/pkg/render"
+	rtest "github.com/tigera/operator/pkg/render/common/test"
+	"github.com/tigera/operator/pkg/render/logstorage/eck"
+	"github.com/tigera/operator/pkg/render/testutils"
 )
 
 var _ = Describe("ECK rendering tests", func() {
@@ -49,6 +52,7 @@ var _ = Describe("ECK rendering tests", func() {
 			&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "elastic-operator"}},
 			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "elastic-operator", Namespace: eck.OperatorNamespace}},
 			&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: eck.OperatorName, Namespace: eck.OperatorNamespace}},
+			&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.TigeraOperatorSecrets, Namespace: eck.OperatorNamespace}, TypeMeta: metav1.TypeMeta{Kind: "RoleBinding", APIVersion: "rbac.authorization.k8s.io/v1"}},
 		}
 
 		BeforeEach(func() {
@@ -145,17 +149,17 @@ var _ = Describe("ECK rendering tests", func() {
 				},
 				{
 					APIGroups: []string{""},
-					Resources: []string{"pods", "endpoints", "events", "persistentvolumeclaims", "secrets", "services", "configmaps", "serviceaccounts"},
+					Resources: []string{"endpoints"},
+					Verbs:     []string{"get", "list", "watch"},
+				},
+				{
+					APIGroups: []string{""},
+					Resources: []string{"pods", "events", "persistentvolumeclaims", "secrets", "services", "configmaps"},
 					Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 				},
 				{
 					APIGroups: []string{"apps"},
 					Resources: []string{"deployments", "statefulsets", "daemonsets"},
-					Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
-				},
-				{
-					APIGroups: []string{"batch"},
-					Resources: []string{"cronjobs"},
 					Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 				},
 				{
@@ -165,58 +169,68 @@ var _ = Describe("ECK rendering tests", func() {
 				},
 				{
 					APIGroups: []string{"elasticsearch.k8s.elastic.co"},
-					Resources: []string{"elasticsearches", "elasticsearches/status", "elasticsearches/finalizers", "enterpriselicenses", "enterpriselicenses/status"},
-					Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+					Resources: []string{"elasticsearches", "elasticsearches/status", "elasticsearches/finalizers"},
+					Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 				},
 				{
 					APIGroups: []string{"autoscaling.k8s.elastic.co"},
 					Resources: []string{"elasticsearchautoscalers", "elasticsearchautoscalers/status", "elasticsearchautoscalers/finalizers"},
-					Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+					Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 				},
 				{
 					APIGroups: []string{"kibana.k8s.elastic.co"},
 					Resources: []string{"kibanas", "kibanas/status", "kibanas/finalizers"},
-					Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+					Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 				},
 				{
 					APIGroups: []string{"apm.k8s.elastic.co"},
 					Resources: []string{"apmservers", "apmservers/status", "apmservers/finalizers"},
-					Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+					Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 				},
 				{
 					APIGroups: []string{"enterprisesearch.k8s.elastic.co"},
 					Resources: []string{"enterprisesearches", "enterprisesearches/status", "enterprisesearches/finalizers"},
-					Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+					Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 				},
 				{
 					APIGroups: []string{"beat.k8s.elastic.co"},
 					Resources: []string{"beats", "beats/status", "beats/finalizers"},
-					Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+					Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 				},
 				{
 					APIGroups: []string{"agent.k8s.elastic.co"},
 					Resources: []string{"agents", "agents/status", "agents/finalizers"},
-					Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+					Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 				},
 				{
 					APIGroups: []string{"maps.k8s.elastic.co"},
 					Resources: []string{"elasticmapsservers", "elasticmapsservers/status", "elasticmapsservers/finalizers"},
-					Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+					Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 				},
 				{
 					APIGroups: []string{"stackconfigpolicy.k8s.elastic.co"},
 					Resources: []string{"stackconfigpolicies", "stackconfigpolicies/status", "stackconfigpolicies/finalizers"},
+					Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
+				},
+				{
+					APIGroups: []string{"logstash.k8s.elastic.co"},
+					Resources: []string{"logstashes", "logstashes/status", "logstashes/finalizers"},
+					Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
+				},
+				{
+					APIGroups: []string{"storage.k8s.io"},
+					Resources: []string{"storageclasses"},
+					Verbs:     []string{"get", "list", "watch"},
+				},
+				{
+					APIGroups: []string{"admissionregistration.k8s.io"},
+					Resources: []string{"validatingwebhookconfigurations"},
 					Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 				},
 				{
-					APIGroups: []string{"associations.k8s.elastic.co"},
-					Resources: []string{"apmserverelasticsearchassociations", "apmserverelasticsearchassociations/status"},
-					Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
-				},
-				{
-					APIGroups: []string{"autoscaling.k8s.elastic.co"},
-					Resources: []string{"elasticsearchautoscalers", "elasticsearchautoscalers/status", "elasticsearchautoscalers/finalizers"},
-					Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+					APIGroups: []string{""},
+					Resources: []string{"nodes"},
+					Verbs:     []string{"get", "list", "watch"},
 				},
 			}))
 		})
@@ -231,12 +245,28 @@ var _ = Describe("ECK rendering tests", func() {
 				&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "elastic-operator", Namespace: eck.OperatorNamespace}},
 				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: eck.EnterpriseTrial, Namespace: eck.OperatorNamespace}},
 				&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: eck.OperatorName, Namespace: eck.OperatorNamespace}},
+				&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.TigeraOperatorSecrets, Namespace: eck.OperatorNamespace}, TypeMeta: metav1.TypeMeta{Kind: "RoleBinding", APIVersion: "rbac.authorization.k8s.io/v1"}},
 			}
 
 			cfg.ApplyTrial = true
 			component := eck.ECK(cfg)
 			createResources, _ := component.Objects()
 			rtest.ExpectResources(createResources, expectedResources)
+		})
+
+		It("should render toleration on GKE", func() {
+			cfg.Installation.KubernetesProvider = operatorv1.ProviderGKE
+			component := eck.ECK(cfg)
+			Expect(component.ResolveImages(nil)).To(BeNil())
+			resources, _ := component.Objects()
+			statefulSet := rtest.GetResource(resources, eck.OperatorName, eck.OperatorNamespace, "apps", "v1", "StatefulSet").(*appsv1.StatefulSet)
+			Expect(statefulSet).NotTo(BeNil())
+			Expect(statefulSet.Spec.Template.Spec.Tolerations).To(ContainElement(corev1.Toleration{
+				Key:      "kubernetes.io/arch",
+				Operator: corev1.TolerationOpEqual,
+				Value:    "arm64",
+				Effect:   corev1.TaintEffectNoSchedule,
+			}))
 		})
 
 		It("should render SecurityContextConstrains properly when provider is OpenShift", func() {

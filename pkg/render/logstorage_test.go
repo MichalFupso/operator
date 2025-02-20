@@ -167,6 +167,11 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 					&esv1.Elasticsearch{ObjectMeta: metav1.ObjectMeta{Name: render.ElasticsearchName, Namespace: render.ElasticsearchNamespace}},
 					&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: render.EsManagerRole, Namespace: render.ElasticsearchNamespace}},
 					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.EsManagerRoleBinding, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: common.OperatorNamespace()}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: common.OperatorNamespace()}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "tigera-operator-secrets", Namespace: render.ElasticsearchNamespace}},
 				}
 
 				component := render.LogStorage(cfg)
@@ -195,7 +200,7 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 
 				// Verify that an initContainer is added
 				initContainers := resultES.Spec.NodeSets[0].PodTemplate.Spec.InitContainers
-				Expect(initContainers).To(HaveLen(1))
+				Expect(initContainers).To(HaveLen(3))
 				Expect(initContainers[0].Name).To(Equal("elastic-internal-init-os-settings"))
 				Expect(*initContainers[0].SecurityContext.AllowPrivilegeEscalation).To(BeTrue())
 				Expect(*initContainers[0].SecurityContext.Privileged).To(BeTrue())
@@ -217,13 +222,12 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 				esContainer := resultES.Spec.NodeSets[0].PodTemplate.Spec.Containers[0]
 				Expect(*esContainer.SecurityContext.AllowPrivilegeEscalation).To(BeFalse())
 				Expect(*esContainer.SecurityContext.Privileged).To(BeFalse())
-				Expect(*esContainer.SecurityContext.RunAsGroup).To(BeEquivalentTo(0))
-				Expect(*esContainer.SecurityContext.RunAsNonRoot).To(BeFalse())
-				Expect(*esContainer.SecurityContext.RunAsUser).To(BeEquivalentTo(0))
+				Expect(*esContainer.SecurityContext.RunAsGroup).To(BeEquivalentTo(10001))
+				Expect(*esContainer.SecurityContext.RunAsNonRoot).To(BeTrue())
+				Expect(*esContainer.SecurityContext.RunAsUser).To(BeEquivalentTo(10001))
 				Expect(esContainer.SecurityContext.Capabilities).To(Equal(
 					&corev1.Capabilities{
 						Drop: []corev1.Capability{"ALL"},
-						Add:  []corev1.Capability{"SETGID", "SETUID", "SYS_CHROOT"},
 					},
 				))
 				Expect(esContainer.SecurityContext.SeccompProfile).To(Equal(
@@ -242,28 +246,31 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 
 				// Check that the expected config made it's way to the Elastic CR
 				Expect(nodeSet.Config.Data).Should(Equal(map[string]interface{}{
-					"node.master":                     "true",
-					"node.data":                       "true",
-					"node.ingest":                     "true",
+					"node.roles":                      []string{"data", "ingest", "master", "remote_cluster_client"},
 					"cluster.max_shards_per_node":     10000,
 					"ingest.geoip.downloader.enabled": false,
 				}))
 			})
 
 			It("should render an elasticsearch Component and delete the Elasticsearch ExternalService as well as Curator components", func() {
-				expectedCreateResources := []resourceTestObj{
-					{render.ElasticsearchNamespace, "", &corev1.Namespace{}, nil},
-					{render.ElasticsearchPolicyName, render.ElasticsearchNamespace, &v3.NetworkPolicy{}, nil},
-					{render.ElasticsearchInternalPolicyName, render.ElasticsearchNamespace, &v3.NetworkPolicy{}, nil},
-					{networkpolicy.TigeraComponentDefaultDenyPolicyName, render.ElasticsearchNamespace, &v3.NetworkPolicy{}, nil},
-					{"tigera-pull-secret", render.ElasticsearchNamespace, &corev1.Secret{}, nil},
-					{"tigera-elasticsearch", render.ElasticsearchNamespace, &corev1.ServiceAccount{}, nil},
-					{relasticsearch.ClusterConfigConfigMapName, common.OperatorNamespace(), &corev1.ConfigMap{}, nil},
-					{render.ElasticsearchName, render.ElasticsearchNamespace, &esv1.Elasticsearch{}, nil},
-					{"tigera-elasticsearch", "", &rbacv1.ClusterRole{}, nil},
-					{"tigera-elasticsearch", "", &rbacv1.ClusterRoleBinding{}, nil},
-					{render.EsManagerRole, render.ElasticsearchNamespace, &rbacv1.Role{}, nil},
-					{render.EsManagerRoleBinding, render.ElasticsearchNamespace, &rbacv1.RoleBinding{}, nil},
+				expectedCreateResources := []client.Object{
+					&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: render.ElasticsearchNamespace}},
+					&v3.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: render.ElasticsearchPolicyName, Namespace: render.ElasticsearchNamespace}},
+					&v3.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: render.ElasticsearchInternalPolicyName, Namespace: render.ElasticsearchNamespace}},
+					&v3.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: networkpolicy.TigeraComponentDefaultDenyPolicyName, Namespace: render.ElasticsearchNamespace}},
+					&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "tigera-pull-secret", Namespace: render.ElasticsearchNamespace}},
+					&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "tigera-elasticsearch", Namespace: render.ElasticsearchNamespace}},
+					&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: relasticsearch.ClusterConfigConfigMapName, Namespace: common.OperatorNamespace()}},
+					&esv1.Elasticsearch{ObjectMeta: metav1.ObjectMeta{Name: render.ElasticsearchName, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "tigera-elasticsearch"}},
+					&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "tigera-elasticsearch"}},
+					&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: render.EsManagerRole, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.EsManagerRoleBinding, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: common.OperatorNamespace()}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: common.OperatorNamespace()}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.TigeraOperatorSecrets, Namespace: render.ElasticsearchNamespace}},
 				}
 
 				expectedDeleteResources := []resourceTestObj{
@@ -285,8 +292,8 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 				component := render.LogStorage(cfg)
 
 				createResources, deleteResources := component.Objects()
-
-				compareResources(createResources, expectedCreateResources)
+				rtest.ExpectResources(createResources, expectedCreateResources)
+				//compareResources(createResources, expectedCreateResources)
 				compareResources(deleteResources, expectedDeleteResources)
 			})
 
@@ -300,31 +307,36 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 
 				cfg.ElasticsearchKeyPair, cfg.TrustedBundle = getTLS(cfg.Installation)
 
-				expectedCreateResources := []resourceTestObj{
-					{render.ElasticsearchNamespace, "", &corev1.Namespace{}, nil},
-					{render.ElasticsearchPolicyName, render.ElasticsearchNamespace, &v3.NetworkPolicy{}, nil},
-					{render.ElasticsearchInternalPolicyName, render.ElasticsearchNamespace, &v3.NetworkPolicy{}, nil},
-					{networkpolicy.TigeraComponentDefaultDenyPolicyName, render.ElasticsearchNamespace, &v3.NetworkPolicy{}, nil},
-					{"tigera-pull-secret", render.ElasticsearchNamespace, &corev1.Secret{}, nil},
-					{"tigera-elasticsearch", render.ElasticsearchNamespace, &corev1.ServiceAccount{}, nil},
-					{relasticsearch.ClusterConfigConfigMapName, common.OperatorNamespace(), &corev1.ConfigMap{}, nil},
-					{render.ElasticsearchName, render.ElasticsearchNamespace, &esv1.Elasticsearch{}, nil},
-					{"tigera-elasticsearch", "", &rbacv1.ClusterRole{}, nil},
-					{"tigera-elasticsearch", "", &rbacv1.ClusterRoleBinding{}, nil},
-					{render.EsManagerRole, render.ElasticsearchNamespace, &rbacv1.Role{}, nil},
-					{render.EsManagerRoleBinding, render.ElasticsearchNamespace, &rbacv1.RoleBinding{}, nil},
+				expectedCreateResources := []client.Object{
+					&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: render.ElasticsearchNamespace}},
+					&v3.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: render.ElasticsearchPolicyName, Namespace: render.ElasticsearchNamespace}},
+					&v3.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: render.ElasticsearchInternalPolicyName, Namespace: render.ElasticsearchNamespace}},
+					&v3.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: networkpolicy.TigeraComponentDefaultDenyPolicyName, Namespace: render.ElasticsearchNamespace}},
+					&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "tigera-pull-secret", Namespace: render.ElasticsearchNamespace}},
+					&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "tigera-elasticsearch", Namespace: render.ElasticsearchNamespace}},
+					&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: relasticsearch.ClusterConfigConfigMapName, Namespace: common.OperatorNamespace()}},
+					&esv1.Elasticsearch{ObjectMeta: metav1.ObjectMeta{Name: render.ElasticsearchName, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "tigera-elasticsearch"}},
+					&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "tigera-elasticsearch"}},
+					&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: render.EsManagerRole, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.EsManagerRoleBinding, Namespace: render.ElasticsearchNamespace}},
 					// Certificate management comes with two additional cluster role bindings:
-					{relasticsearch.UnusedCertSecret, common.OperatorNamespace(), &corev1.Secret{}, nil},
-					{render.TigeraElasticsearchInternalCertSecret, render.ElasticsearchNamespace, &corev1.Secret{}, nil},
+					&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: relasticsearch.UnusedCertSecret, Namespace: common.OperatorNamespace()}},
+					&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: render.TigeraElasticsearchInternalCertSecret, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: common.OperatorNamespace()}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: common.OperatorNamespace()}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.TigeraOperatorSecrets, Namespace: render.ElasticsearchNamespace}},
 				}
+
 				cfg.UnusedTLSSecret = &corev1.Secret{
 					ObjectMeta: metav1.ObjectMeta{Name: relasticsearch.UnusedCertSecret, Namespace: common.OperatorNamespace()},
 				}
 				component := render.LogStorage(cfg)
 
 				createResources, deleteResources := component.Objects()
-
-				compareResources(createResources, expectedCreateResources)
+				rtest.ExpectResources(createResources, expectedCreateResources)
 				compareResources(deleteResources, []resourceTestObj{
 					{render.ESCuratorName, render.ElasticsearchNamespace, &batchv1.CronJob{}, nil},
 					{render.ESCuratorName, "", &rbacv1.ClusterRole{}, nil},
@@ -338,7 +350,7 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 					"elasticsearch.k8s.elastic.co", "v1", "Elasticsearch").(*esv1.Elasticsearch)
 
 				initContainers := resultES.Spec.NodeSets[0].PodTemplate.Spec.InitContainers
-				Expect(initContainers).To(HaveLen(4))
+				Expect(initContainers).To(HaveLen(5))
 				compareInitContainer := func(ic corev1.Container, expectedName string, expectedVolumes []corev1.VolumeMount, privileged bool) {
 					Expect(ic.Name).To(Equal(expectedName))
 					Expect(ic.VolumeMounts).To(HaveLen(len(expectedVolumes)))
@@ -352,12 +364,30 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 				compareInitContainer(initContainers[1], "elastic-internal-init-filesystem", []corev1.VolumeMount{
 					{Name: "elastic-internal-transport-certificates", MountPath: "/csr"},
 				}, true)
-				compareInitContainer(initContainers[2], "key-cert-elastic", []corev1.VolumeMount{
+				compareInitContainer(initContainers[2], "elastic-internal-suspend", nil, true)
+				compareInitContainer(initContainers[3], "key-cert-elastic", []corev1.VolumeMount{
 					{Name: "elastic-internal-http-certificates", MountPath: certificatemanagement.CSRCMountPath},
 				}, false)
-				compareInitContainer(initContainers[3], "key-cert-elastic-transport", []corev1.VolumeMount{
+				compareInitContainer(initContainers[4], "key-cert-elastic-transport", []corev1.VolumeMount{
 					{Name: "elastic-internal-transport-certificates", MountPath: certificatemanagement.CSRCMountPath},
 				}, false)
+			})
+
+			It("should render toleration on GKE", func() {
+				cfg.Installation.KubernetesProvider = operatorv1.ProviderGKE
+
+				component := render.LogStorage(cfg)
+				createResources, _ := component.Objects()
+
+				resultES := rtest.GetResource(createResources, render.ElasticsearchName, render.ElasticsearchNamespace,
+					"elasticsearch.k8s.elastic.co", "v1", "Elasticsearch").(*esv1.Elasticsearch)
+				Expect(resultES).NotTo(BeNil())
+				Expect(resultES.Spec.NodeSets[0].PodTemplate.Spec.Tolerations).To(ContainElements(corev1.Toleration{
+					Key:      "kubernetes.io/arch",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "arm64",
+					Effect:   corev1.TaintEffectNoSchedule,
+				}))
 			})
 		})
 
@@ -367,26 +397,30 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 			})
 
 			It("should render correctly", func() {
-				expectedCreateResources := []resourceTestObj{
-					{render.ElasticsearchNamespace, "", &corev1.Namespace{}, nil},
-					{render.ElasticsearchPolicyName, render.ElasticsearchNamespace, &v3.NetworkPolicy{}, nil},
-					{render.ElasticsearchInternalPolicyName, render.ElasticsearchNamespace, &v3.NetworkPolicy{}, nil},
-					{networkpolicy.TigeraComponentDefaultDenyPolicyName, render.ElasticsearchNamespace, &v3.NetworkPolicy{}, nil},
-					{"tigera-pull-secret", render.ElasticsearchNamespace, &corev1.Secret{}, nil},
-					{"tigera-elasticsearch", render.ElasticsearchNamespace, &corev1.ServiceAccount{}, nil},
-					{relasticsearch.ClusterConfigConfigMapName, common.OperatorNamespace(), &corev1.ConfigMap{}, nil},
-					{render.ElasticsearchName, render.ElasticsearchNamespace, &esv1.Elasticsearch{}, nil},
-					{"tigera-elasticsearch", "", &rbacv1.ClusterRole{}, nil},
-					{"tigera-elasticsearch", "", &rbacv1.ClusterRoleBinding{}, nil},
-					{render.EsManagerRole, render.ElasticsearchNamespace, &rbacv1.Role{}, nil},
-					{render.EsManagerRoleBinding, render.ElasticsearchNamespace, &rbacv1.RoleBinding{}, nil},
+				expectedCreateResources := []client.Object{
+					&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: render.ElasticsearchNamespace}},
+					&v3.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: render.ElasticsearchPolicyName, Namespace: render.ElasticsearchNamespace}},
+					&v3.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: render.ElasticsearchInternalPolicyName, Namespace: render.ElasticsearchNamespace}},
+					&v3.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: networkpolicy.TigeraComponentDefaultDenyPolicyName, Namespace: render.ElasticsearchNamespace}},
+					&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "tigera-pull-secret", Namespace: render.ElasticsearchNamespace}},
+					&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "tigera-elasticsearch", Namespace: render.ElasticsearchNamespace}},
+					&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: relasticsearch.ClusterConfigConfigMapName, Namespace: common.OperatorNamespace()}},
+					&esv1.Elasticsearch{ObjectMeta: metav1.ObjectMeta{Name: render.ElasticsearchName, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "tigera-elasticsearch"}},
+					&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "tigera-elasticsearch"}},
+					&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: render.EsManagerRole, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.EsManagerRoleBinding, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: render.ElasticsearchNamespace}},
+					&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: common.OperatorNamespace()}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: common.OperatorNamespace()}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.TigeraOperatorSecrets, Namespace: render.ElasticsearchNamespace}},
 				}
 
 				cfg.Provider = operatorv1.ProviderNone
 				component := render.LogStorage(cfg)
 				createResources, deleteResources := component.Objects()
-
-				compareResources(createResources, expectedCreateResources)
+				rtest.ExpectResources(createResources, expectedCreateResources)
 				compareResources(deleteResources, []resourceTestObj{
 					{render.ESCuratorName, render.ElasticsearchNamespace, &batchv1.CronJob{}, nil},
 					{render.ESCuratorName, "", &rbacv1.ClusterRole{}, nil},
@@ -509,117 +543,6 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 				ResourceNames: []string{"privileged"},
 			}))
 		})
-
-		It("should render elastic with the correct JAVA options for FIPS", func() {
-			fipsEnabled := operatorv1.FIPSModeEnabled
-			cfg.Installation.FIPSMode = &fipsEnabled
-			cfg.LogStorage.Spec.Nodes.ResourceRequirements = &corev1.ResourceRequirements{
-				Limits: corev1.ResourceList{
-					"cpu":    resource.MustParse("1"),
-					"memory": resource.MustParse("150Mi"),
-				},
-				Requests: corev1.ResourceList{
-					"cpu":     resource.MustParse("1"),
-					"memory":  resource.MustParse("150Mi"),
-					"storage": resource.MustParse("10Gi"),
-				},
-			}
-
-			cfg.ApplyTrial = true
-			cfg.KeyStoreSecret = render.CreateElasticsearchKeystoreSecret()
-			cfg.KeyStoreSecret.Data[render.ElasticsearchKeystoreEnvName] = []byte("12345")
-			expectedCreateResources := []resourceTestObj{
-				{render.ElasticsearchNamespace, "", &corev1.Namespace{}, nil},
-				{render.ElasticsearchPolicyName, render.ElasticsearchNamespace, &v3.NetworkPolicy{}, nil},
-				{render.ElasticsearchInternalPolicyName, render.ElasticsearchNamespace, &v3.NetworkPolicy{}, nil},
-				{networkpolicy.TigeraComponentDefaultDenyPolicyName, render.ElasticsearchNamespace, &v3.NetworkPolicy{}, nil},
-				{"tigera-pull-secret", render.ElasticsearchNamespace, &corev1.Secret{}, nil},
-				{"tigera-elasticsearch", render.ElasticsearchNamespace, &corev1.ServiceAccount{}, nil},
-				{relasticsearch.ClusterConfigConfigMapName, common.OperatorNamespace(), &corev1.ConfigMap{}, nil},
-				{render.ElasticsearchName, render.ElasticsearchNamespace, &esv1.Elasticsearch{}, nil},
-				{"tigera-elasticsearch", "", &rbacv1.ClusterRole{}, nil},
-				{"tigera-elasticsearch", "", &rbacv1.ClusterRoleBinding{}, nil},
-				{render.ElasticsearchKeystoreSecret, common.OperatorNamespace(), &corev1.Secret{}, nil},
-				{render.ElasticsearchKeystoreSecret, render.ElasticsearchNamespace, &corev1.Secret{}, nil},
-				{render.EsManagerRole, render.ElasticsearchNamespace, &rbacv1.Role{}, nil},
-				{render.EsManagerRoleBinding, render.ElasticsearchNamespace, &rbacv1.RoleBinding{}, nil},
-			}
-
-			component := render.LogStorage(cfg)
-			Expect(component.ResolveImages(nil)).NotTo(HaveOccurred())
-			createResources, deleteResources := component.Objects()
-
-			compareResources(createResources, expectedCreateResources)
-			compareResources(deleteResources, []resourceTestObj{
-				{render.ESCuratorName, render.ElasticsearchNamespace, &batchv1.CronJob{}, nil},
-				{render.ESCuratorName, "", &rbacv1.ClusterRole{}, nil},
-				{render.ESCuratorName, "", &rbacv1.ClusterRoleBinding{}, nil},
-				{render.EsCuratorPolicyName, render.ElasticsearchNamespace, &v3.NetworkPolicy{}, nil},
-				{render.EsCuratorServiceAccount, render.ElasticsearchNamespace, &corev1.ServiceAccount{}, nil},
-				{render.ElasticsearchCuratorUserSecret, render.ElasticsearchNamespace, &corev1.Secret{}, nil},
-			})
-
-			es := getElasticsearch(createResources)
-			Expect(es.Spec.NodeSets[0].PodTemplate.Spec.Containers).To(HaveLen(1))
-			esContainer := es.Spec.NodeSets[0].PodTemplate.Spec.Containers[0]
-			Expect(esContainer.Env).Should(ContainElement(corev1.EnvVar{
-				Name: "ES_JAVA_OPTS",
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: render.ElasticsearchKeystoreSecret},
-						Key:                  "ES_JAVA_OPTS",
-					},
-				},
-			}))
-			initContainers := es.Spec.NodeSets[0].PodTemplate.Spec.InitContainers
-
-			resource := rtest.GetResource(createResources, render.ElasticsearchKeystoreSecret, common.OperatorNamespace(), "", "v1", "Secret")
-			Expect(resource).ShouldNot(BeNil())
-			keystoreSecret, ok := resource.(*corev1.Secret)
-			Expect(ok).To(BeTrue())
-			Expect(keystoreSecret.Data["ES_JAVA_OPTS"]).Should(Equal([]byte("-Xms75M -Xmx75M --module-path /usr/share/bc-fips/ -Djavax.net.ssl.trustStore=/usr/share/elasticsearch/config/cacerts.bcfks -Djavax.net.ssl.trustStoreType=BCFKS -Djavax.net.ssl.trustStorePassword=12345 -Dorg.bouncycastle.fips.approved_only=true")))
-			Expect(es.Spec.Image).To(ContainSubstring("-fips"))
-			Expect(es.Spec.NodeSets[0].PodTemplate.Spec.Containers[0].Env).To(ConsistOf(
-				corev1.EnvVar{
-					Name: render.ElasticsearchKeystoreEnvName,
-					ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: render.ElasticsearchKeystoreSecret},
-							Key:                  render.ElasticsearchKeystoreEnvName,
-						},
-					},
-				},
-				corev1.EnvVar{
-					Name: "ES_JAVA_OPTS",
-					ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: render.ElasticsearchKeystoreSecret},
-							Key:                  "ES_JAVA_OPTS",
-						},
-					},
-				},
-			))
-			Expect(initContainers).To(HaveLen(2))
-			Expect(initContainers[1].Name).To(Equal("elastic-internal-init-keystore"))
-			Expect(initContainers[1].Image).To(ContainSubstring("-fips"))
-			Expect(initContainers[1].Command).To(Equal([]string{"/bin/sh"}))
-			Expect(initContainers[1].Args).To(Equal([]string{"-c", "/usr/bin/initialize_keystore.sh"}))
-			Expect(*initContainers[1].SecurityContext.AllowPrivilegeEscalation).To(BeFalse())
-			Expect(*initContainers[1].SecurityContext.Privileged).To(BeFalse())
-			Expect(*initContainers[1].SecurityContext.RunAsGroup).To(BeEquivalentTo(0))
-			Expect(*initContainers[1].SecurityContext.RunAsNonRoot).To(BeFalse())
-			Expect(*initContainers[1].SecurityContext.RunAsUser).To(BeEquivalentTo(0))
-			Expect(initContainers[1].SecurityContext.Capabilities).To(Equal(
-				&corev1.Capabilities{
-					Drop: []corev1.Capability{"ALL"},
-					Add:  []corev1.Capability{"CHOWN"},
-				},
-			))
-			Expect(initContainers[1].SecurityContext.SeccompProfile).To(Equal(
-				&corev1.SeccompProfile{
-					Type: corev1.SeccompProfileTypeRuntimeDefault,
-				}))
-		})
 	})
 
 	Context("Managed cluster", func() {
@@ -642,28 +565,33 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 
 		Context("Initial creation", func() {
 			It("creates Managed cluster logstorage components", func() {
-				expectedCreateResources := []resourceTestObj{
-					{render.ElasticsearchNamespace, "", &corev1.Namespace{}, nil},
-					{render.ESGatewayServiceName, render.ElasticsearchNamespace, &corev1.Service{}, func(resource runtime.Object) {
-						svc := resource.(*corev1.Service)
-						Expect(svc.Spec.Type).Should(Equal(corev1.ServiceTypeExternalName))
-						Expect(svc.Spec.ExternalName).Should(Equal(fmt.Sprintf("%s.%s.svc.%s", render.GuardianServiceName, render.GuardianNamespace, dns.DefaultClusterDomain)))
-					}},
-					{render.LinseedServiceName, render.ElasticsearchNamespace, &corev1.Service{}, func(resource runtime.Object) {
-						svc := resource.(*corev1.Service)
-						Expect(svc.Spec.Type).Should(Equal(corev1.ServiceTypeExternalName))
-						Expect(svc.Spec.ExternalName).Should(Equal(fmt.Sprintf("%s.%s.svc.%s", render.GuardianServiceName, render.GuardianNamespace, dns.DefaultClusterDomain)))
-					}},
-					{"tigera-linseed-secrets", "", &rbacv1.ClusterRole{}, nil},
-					{"tigera-linseed-configmaps", "", &rbacv1.ClusterRole{}, nil},
-					{"tigera-linseed-namespaces", "", &rbacv1.ClusterRole{}, nil},
-					{"tigera-linseed", "calico-system", &rbacv1.RoleBinding{}, nil},
-					{"tigera-linseed", "tigera-operator", &rbacv1.RoleBinding{}, nil},
-					{"tigera-linseed", "", &rbacv1.ClusterRoleBinding{}, nil},
+				expectedCreateResources := []client.Object{
+					&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: render.ElasticsearchNamespace}},
+					&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: render.ESGatewayServiceName, Namespace: render.ElasticsearchNamespace},
+						Spec: corev1.ServiceSpec{
+							Type: corev1.ServiceTypeExternalName, ExternalName: fmt.Sprintf("%s.%s.svc.%s", render.GuardianServiceName, render.GuardianNamespace, dns.DefaultClusterDomain),
+						},
+					},
+					&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: render.LinseedServiceName, Namespace: render.ElasticsearchNamespace},
+						Spec: corev1.ServiceSpec{
+							Type:         corev1.ServiceTypeExternalName,
+							ExternalName: fmt.Sprintf("%s.%s.svc.%s", render.GuardianServiceName, render.GuardianNamespace, dns.DefaultClusterDomain),
+						},
+					},
+					&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "tigera-linseed-secrets"}},
+					&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "tigera-linseed-configmaps"}},
+					&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "tigera-linseed-namespaces"}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "tigera-linseed", Namespace: "calico-system"}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "tigera-linseed", Namespace: "tigera-operator"}},
+					&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "tigera-linseed"}},
+					&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: common.OperatorNamespace()}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.CalicoKubeControllerSecret, Namespace: common.OperatorNamespace()}},
+					&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: render.TigeraOperatorSecrets, Namespace: render.ElasticsearchNamespace}},
 				}
+
 				component := render.NewManagedClusterLogStorage(cfg)
 				createResources, deleteResources := component.Objects()
-				compareResources(createResources, expectedCreateResources)
+				rtest.ExpectResources(createResources, expectedCreateResources)
 				compareResources(deleteResources, []resourceTestObj{})
 			})
 		})
@@ -975,7 +903,8 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 
 					createResources, _ := component.Objects()
 					pvcResource := getElasticsearch(createResources).Spec.NodeSets[0].VolumeClaimTemplates[0].Spec.Resources
-					Expect(pvcResource).Should(Equal(res))
+					Expect(pvcResource.Limits).Should(Equal(res.Limits))
+					Expect(pvcResource.Requests).Should(Equal(res.Requests))
 				})
 
 				It("sets storage value of Requests to user's Limits when user's Requests is not set and default Requests is greater than Limits in pvc template", func() {
@@ -1001,7 +930,8 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 
 					createResources, _ := component.Objects()
 					pvcResource := getElasticsearch(createResources).Spec.NodeSets[0].VolumeClaimTemplates[0].Spec.Resources
-					Expect(pvcResource).Should(Equal(expected))
+					Expect(pvcResource.Limits).Should(Equal(expected.Limits))
+					Expect(pvcResource.Requests).Should(Equal(expected.Requests))
 				})
 			})
 		})
@@ -1062,12 +992,10 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 						},
 					}))
 					Expect(nodeSets[0].Config.Data).Should(Equal(map[string]interface{}{
-						"node.master":                     "true",
-						"node.data":                       "true",
-						"node.ingest":                     "true",
-						"cluster.max_shards_per_node":     10000,
-						"ingest.geoip.downloader.enabled": false,
-						"node.attr.zone":                  "us-west-2a",
+						"node.roles":                                      []string{"data", "ingest", "master", "remote_cluster_client"},
+						"cluster.max_shards_per_node":                     10000,
+						"ingest.geoip.downloader.enabled":                 false,
+						"node.attr.zone":                                  "us-west-2a",
 						"cluster.routing.allocation.awareness.attributes": "zone",
 					}))
 
@@ -1083,12 +1011,10 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 						},
 					}))
 					Expect(nodeSets[1].Config.Data).Should(Equal(map[string]interface{}{
-						"node.master":                     "true",
-						"node.data":                       "true",
-						"node.ingest":                     "true",
-						"cluster.max_shards_per_node":     10000,
-						"ingest.geoip.downloader.enabled": false,
-						"node.attr.zone":                  "us-west-2b",
+						"node.roles":                                      []string{"data", "ingest", "master", "remote_cluster_client"},
+						"cluster.max_shards_per_node":                     10000,
+						"ingest.geoip.downloader.enabled":                 false,
+						"node.attr.zone":                                  "us-west-2b",
 						"cluster.routing.allocation.awareness.attributes": "zone",
 					}))
 				})
@@ -1155,13 +1081,11 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 						},
 					}))
 					Expect(nodeSets[0].Config.Data).Should(Equal(map[string]interface{}{
-						"node.master":                     "true",
-						"node.data":                       "true",
-						"node.ingest":                     "true",
-						"cluster.max_shards_per_node":     10000,
-						"ingest.geoip.downloader.enabled": false,
-						"node.attr.zone":                  "us-west-2a",
-						"node.attr.rack":                  "rack1",
+						"node.roles":                                      []string{"data", "ingest", "master", "remote_cluster_client"},
+						"cluster.max_shards_per_node":                     10000,
+						"ingest.geoip.downloader.enabled":                 false,
+						"node.attr.zone":                                  "us-west-2a",
+						"node.attr.rack":                                  "rack1",
 						"cluster.routing.allocation.awareness.attributes": "zone,rack",
 					}))
 
@@ -1186,13 +1110,11 @@ var _ = Describe("Elasticsearch rendering tests", func() {
 						},
 					}))
 					Expect(nodeSets[1].Config.Data).Should(Equal(map[string]interface{}{
-						"node.master":                     "true",
-						"node.data":                       "true",
-						"node.ingest":                     "true",
-						"cluster.max_shards_per_node":     10000,
-						"ingest.geoip.downloader.enabled": false,
-						"node.attr.zone":                  "us-west-2b",
-						"node.attr.rack":                  "rack1",
+						"node.roles":                                      []string{"data", "ingest", "master", "remote_cluster_client"},
+						"cluster.max_shards_per_node":                     10000,
+						"ingest.geoip.downloader.enabled":                 false,
+						"node.attr.zone":                                  "us-west-2b",
+						"node.attr.rack":                                  "rack1",
 						"cluster.routing.allocation.awareness.attributes": "zone,rack",
 					}))
 				})

@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2019-2025 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -107,15 +107,10 @@ type KubeControllersConfiguration struct {
 
 func NewCalicoKubeControllers(cfg *KubeControllersConfiguration) *kubeControllersComponent {
 	kubeControllerRolePolicyRules := kubeControllersRoleCommonRules(cfg, KubeController)
-	enabledControllers := []string{"node"}
+	enabledControllers := []string{"node", "loadbalancer"}
 	if cfg.Installation.Variant == operatorv1.TigeraSecureEnterprise {
 		kubeControllerRolePolicyRules = append(kubeControllerRolePolicyRules, kubeControllersRoleEnterpriseCommonRules(cfg)...)
 		kubeControllerRolePolicyRules = append(kubeControllerRolePolicyRules,
-			rbacv1.PolicyRule{
-				APIGroups: []string{""},
-				Resources: []string{"secrets"},
-				Verbs:     []string{"deletecollection"},
-			},
 			rbacv1.PolicyRule{
 				APIGroups: []string{"crd.projectcalico.org"},
 				Resources: []string{"remoteclusterconfigurations"},
@@ -366,6 +361,11 @@ func kubeControllersRoleCommonRules(cfg *KubeControllersConfiguration, kubeContr
 			Verbs:     []string{"get", "list", "watch"},
 		},
 		{
+			APIGroups: []string{""},
+			Resources: []string{"services", "services/status"},
+			Verbs:     []string{"get", "list", "update", "watch"},
+		},
+		{
 			// IPAM resources are manipulated in response to node and block updates, as well as periodic triggers.
 			APIGroups: []string{"crd.projectcalico.org"},
 			Resources: []string{"ipreservations"},
@@ -373,7 +373,7 @@ func kubeControllersRoleCommonRules(cfg *KubeControllersConfiguration, kubeContr
 		},
 		{
 			APIGroups: []string{"crd.projectcalico.org"},
-			Resources: []string{"blockaffinities", "ipamblocks", "ipamhandles", "networksets"},
+			Resources: []string{"blockaffinities", "ipamblocks", "ipamhandles", "networksets", "ipamconfigs"},
 			Verbs:     []string{"get", "list", "create", "update", "delete", "watch"},
 		},
 		{
@@ -400,7 +400,7 @@ func kubeControllersRoleCommonRules(cfg *KubeControllersConfiguration, kubeContr
 			// as well.
 			APIGroups: []string{"crd.projectcalico.org"},
 			Resources: []string{"kubecontrollersconfigurations"},
-			Verbs:     []string{"get", "create", "update", "watch"},
+			Verbs:     []string{"get", "create", "list", "update", "watch"},
 		},
 		{
 			// calico-kube-controllers requires tiers create
@@ -426,8 +426,15 @@ func kubeControllersRoleEnterpriseCommonRules(cfg *KubeControllersConfiguration)
 	rules := []rbacv1.PolicyRule{
 		{
 			APIGroups: []string{""},
-			Resources: []string{"configmaps", "secrets"},
+			Resources: []string{"configmaps"},
 			Verbs:     []string{"watch", "list", "get", "update", "create", "delete"},
+		},
+		{
+			// The Federated Services Controller needs access to the remote kubeconfig secret
+			// in order to create a remote syncer.
+			APIGroups: []string{""},
+			Resources: []string{"secrets"},
+			Verbs:     []string{"watch", "list", "get"},
 		},
 		{
 			// Needed to validate the license
@@ -523,7 +530,6 @@ func (c *kubeControllersComponent) controllersDeployment() *appsv1.Deployment {
 		{Name: "KUBE_CONTROLLERS_CONFIG_NAME", Value: c.kubeControllerConfigName},
 		{Name: "DATASTORE_TYPE", Value: "kubernetes"},
 		{Name: "ENABLED_CONTROLLERS", Value: strings.Join(c.enabledControllers, ",")},
-		{Name: "FIPS_MODE_ENABLED", Value: operatorv1.IsFIPSModeEnabledString(c.cfg.Installation.FIPSMode)},
 		{Name: "DISABLE_KUBE_CONTROLLERS_CONFIG_API", Value: strconv.FormatBool(c.cfg.Tenant.MultiTenant() && c.kubeControllerConfigName == "elasticsearch")},
 	}
 
@@ -627,9 +633,13 @@ func (c *kubeControllersComponent) controllersDeployment() *appsv1.Deployment {
 	if c.cfg.MetricsServerTLS != nil && c.cfg.MetricsServerTLS.UseCertificateManagement() {
 		initContainers = append(initContainers, c.cfg.MetricsServerTLS.InitContainer(c.cfg.Namespace))
 	}
+	tolerations := append(c.cfg.Installation.ControlPlaneTolerations, rmeta.TolerateCriticalAddonsAndControlPlane...)
+	if c.cfg.Installation.KubernetesProvider.IsGKE() {
+		tolerations = append(tolerations, rmeta.TolerateGKEARM64NoSchedule)
+	}
 	podSpec := corev1.PodSpec{
 		NodeSelector:       c.cfg.Installation.ControlPlaneNodeSelector,
-		Tolerations:        append(c.cfg.Installation.ControlPlaneTolerations, rmeta.TolerateCriticalAddonsAndControlPlane...),
+		Tolerations:        tolerations,
 		ImagePullSecrets:   c.cfg.Installation.ImagePullSecrets,
 		ServiceAccountName: c.kubeControllerServiceAccountName,
 		InitContainers:     initContainers,
@@ -810,6 +820,14 @@ func kubeControllersAllowTigeraPolicy(cfg *KubeControllersConfiguration) *v3.Net
 			Destination: v3.EntityRule{
 				Ports: networkpolicy.Ports(uint16(cfg.MetricsPort)),
 			},
+		})
+	}
+
+	if r, err := cfg.K8sServiceEp.DestinationEntityRule(); r != nil && err == nil {
+		egressRules = append(egressRules, v3.Rule{
+			Action:      v3.Allow,
+			Protocol:    &networkpolicy.TCPProtocol,
+			Destination: *r,
 		})
 	}
 

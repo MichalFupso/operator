@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2019-2025 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -142,7 +142,7 @@ func (c *intrusionDetectionComponent) ResolveImages(is *operatorv1.ImageSet) err
 	}
 
 	if len(errMsgs) != 0 {
-		return fmt.Errorf(strings.Join(errMsgs, ","))
+		return fmt.Errorf("%s", strings.Join(errMsgs, ","))
 	}
 	return nil
 }
@@ -315,12 +315,12 @@ func (c *intrusionDetectionComponent) intrusionDetectionClusterRole() *rbacv1.Cl
 		{
 			APIGroups: []string{""},
 			Resources: []string{"secrets", "configmaps"},
-			Verbs:     []string{"get", "watch"},
+			Verbs:     []string{"get", "list", "watch"},
 		},
 		{
 			APIGroups: []string{"crd.projectcalico.org"},
 			Resources: []string{"securityeventwebhooks"},
-			Verbs:     []string{"get", "watch", "update"},
+			Verbs:     []string{"get", "list", "watch", "update"},
 		},
 		{
 			APIGroups: []string{"crd.projectcalico.org"},
@@ -601,6 +601,11 @@ func (c *intrusionDetectionComponent) deploymentPodTemplate() *corev1.PodTemplat
 		containers = append(containers, c.webhooksControllerContainer())
 	}
 
+	tolerations := c.cfg.Installation.ControlPlaneTolerations
+	if c.cfg.Installation.KubernetesProvider.IsGKE() {
+		tolerations = append(tolerations, rmeta.TolerateGKEARM64NoSchedule)
+	}
+
 	return &corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        IntrusionDetectionName,
@@ -608,7 +613,7 @@ func (c *intrusionDetectionComponent) deploymentPodTemplate() *corev1.PodTemplat
 			Annotations: c.intrusionDetectionAnnotations(),
 		},
 		Spec: corev1.PodSpec{
-			Tolerations:        c.cfg.Installation.ControlPlaneTolerations,
+			Tolerations:        tolerations,
 			NodeSelector:       c.cfg.Installation.ControlPlaneNodeSelector,
 			ServiceAccountName: IntrusionDetectionName,
 			ImagePullSecrets:   ps,
@@ -668,10 +673,6 @@ func (c *intrusionDetectionComponent) intrusionDetectionControllerContainer() co
 		{
 			Name:  "MULTI_CLUSTER_FORWARDING_CA",
 			Value: c.cfg.TrustedCertBundle.MountPath(),
-		},
-		{
-			Name:  "FIPS_MODE_ENABLED",
-			Value: operatorv1.IsFIPSModeEnabledString(c.cfg.Installation.FIPSMode),
 		},
 		{
 			Name:  "LINSEED_URL",
@@ -1298,6 +1299,7 @@ type IntrusionDetectionNamespaceConfiguration struct {
 	Namespace                 string
 	KubernetesProvider        operatorv1.Provider
 	HasNoLicense              bool
+	Azure                     *operatorv1.Azure
 }
 
 func (c *intrusionDetectionNamespaceComponent) ResolveImages(is *operatorv1.ImageSet) error {
@@ -1319,7 +1321,8 @@ func (c *intrusionDetectionNamespaceComponent) Objects() ([]client.Object, []cli
 	objs := []client.Object{}
 	if !c.cfg.Tenant.MultiTenant() {
 		// In multi-tenant environments, the namespace is pre-created. So, only create it if we're not in a multi-tenant environment.
-		objs = append(objs, CreateNamespace(c.cfg.Namespace, c.cfg.KubernetesProvider, PodSecurityStandard(pss)))
+		objs = append(objs, CreateNamespace(c.cfg.Namespace, c.cfg.KubernetesProvider, PodSecurityStandard(pss), c.cfg.Azure))
+		objs = append(objs, CreateOperatorSecretsRoleBinding(c.cfg.Namespace))
 	}
 
 	if c.cfg.HasNoLicense {

@@ -111,7 +111,9 @@ func (pr *policyRecommendationComponent) Objects() ([]client.Object, []client.Ob
 	// Management and managed clusters need API access to the resources defined in the policy
 	// recommendation cluster role
 	objs := []client.Object{
-		CreateNamespace(pr.cfg.Namespace, pr.cfg.Installation.KubernetesProvider, PSSRestricted),
+		CreateNamespace(pr.cfg.Namespace, pr.cfg.Installation.KubernetesProvider, PSSRestricted, pr.cfg.Installation.Azure),
+		CreateOperatorSecretsRoleBinding(pr.cfg.Namespace),
+
 		pr.serviceAccount(),
 		pr.clusterRole(),
 		pr.clusterRoleBinding(),
@@ -331,6 +333,11 @@ func (pr *policyRecommendationComponent) deployment() *appsv1.Deployment {
 		initContainers = append(initContainers, pr.cfg.PolicyRecommendationCertSecret.InitContainer(PolicyRecommendationNamespace))
 	}
 
+	tolerations := pr.cfg.Installation.ControlPlaneTolerations
+	if pr.cfg.Installation.KubernetesProvider.IsGKE() {
+		tolerations = append(tolerations, rmeta.TolerateGKEARM64NoSchedule)
+	}
+
 	podTemplateSpec := &corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        PolicyRecommendationName,
@@ -338,7 +345,7 @@ func (pr *policyRecommendationComponent) deployment() *appsv1.Deployment {
 			Annotations: pr.policyRecommendationAnnotations(),
 		},
 		Spec: corev1.PodSpec{
-			Tolerations:        pr.cfg.Installation.ControlPlaneTolerations,
+			Tolerations:        tolerations,
 			NodeSelector:       pr.cfg.Installation.ControlPlaneNodeSelector,
 			ServiceAccountName: PolicyRecommendationName,
 			ImagePullSecrets:   secret.GetReferenceList(pr.cfg.PullSecrets),

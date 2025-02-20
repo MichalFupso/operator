@@ -17,9 +17,11 @@ package clusterconnection
 import (
 	"context"
 	"fmt"
-	"net"
 
-	"github.com/go-logr/logr"
+	"golang.org/x/net/http/httpproxy"
+	v1 "k8s.io/api/apps/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -166,6 +168,10 @@ func add(mgr manager.Manager, c ctrlruntime.Controller) error {
 		return fmt.Errorf("%s failed to watch ImageSet: %w", controllerName, err)
 	}
 
+	if err := utils.AddDeploymentWatch(c, render.GuardianDeploymentName, render.GuardianNamespace); err != nil {
+		return fmt.Errorf("%s failed to watch Guardian deployment: %w", controllerName, err)
+	}
+
 	// Watch for changes to TigeraStatus.
 	if err = utils.AddTigeraStatusWatch(c, ResourceName); err != nil {
 		return fmt.Errorf("clusterconnection-controller failed to watch management-cluster-connection Tigerastatus: %w", err)
@@ -179,12 +185,14 @@ var _ reconcile.Reconciler = &ReconcileConnection{}
 
 // ReconcileConnection reconciles a ManagementClusterConnection object
 type ReconcileConnection struct {
-	Client         client.Client
-	Scheme         *runtime.Scheme
-	Provider       operatorv1.Provider
-	status         status.StatusManager
-	clusterDomain  string
-	tierWatchReady *utils.ReadyFlag
+	Client                     client.Client
+	Scheme                     *runtime.Scheme
+	Provider                   operatorv1.Provider
+	status                     status.StatusManager
+	clusterDomain              string
+	tierWatchReady             *utils.ReadyFlag
+	resolvedPodProxies         []*httpproxy.Config
+	lastAvailabilityTransition metav1.Time
 }
 
 // Reconcile reads that state of the cluster for a ManagementClusterConnection object and makes changes based on the
@@ -323,49 +331,110 @@ func (r *ReconcileConnection) Reconcile(ctx context.Context, request reconcile.R
 		trustedCertBundle.AddCertificates(secret)
 	}
 
+	// Determine the current deployment availability.
+	var currentAvailabilityTransition metav1.Time
+	var currentlyAvailable bool
+	guardianDeployment := v1.Deployment{}
+	err = r.Client.Get(ctx, client.ObjectKey{Name: render.GuardianDeploymentName, Namespace: render.GuardianNamespace}, &guardianDeployment)
+	if err != nil && !k8serrors.IsNotFound(err) {
+		r.status.SetDegraded(operatorv1.ResourceReadError, "Failed to read the deployment status of Guardian", err, reqLogger)
+		return reconcile.Result{}, nil
+	} else if err == nil {
+		for _, condition := range guardianDeployment.Status.Conditions {
+			if condition.Type == v1.DeploymentAvailable {
+				currentAvailabilityTransition = condition.LastTransitionTime
+				if condition.Status == corev1.ConditionTrue {
+					currentlyAvailable = true
+				}
+				break
+			}
+		}
+	}
+
+	// Resolve the proxies used by each Guardian pod. We only update the resolved proxies if the availability of the
+	// Guardian deployment has changed since our last reconcile and the deployment is currently available. We restrict
+	// the resolution of pod proxies in this way to limit the number of pod queries we make.
+	if !currentAvailabilityTransition.Equal(&r.lastAvailabilityTransition) && currentlyAvailable {
+		// Query guardian pods.
+		labelSelector := labels.SelectorFromSet(map[string]string{
+			"app.kubernetes.io/name": render.GuardianDeploymentName,
+		})
+		pods := corev1.PodList{}
+		err := r.Client.List(ctx, &pods, &client.ListOptions{
+			LabelSelector: labelSelector,
+			Namespace:     render.GuardianNamespace,
+		})
+		if err != nil {
+			r.status.SetDegraded(operatorv1.ResourceReadError, "Failed to list the pods of the Guardian deployment", err, reqLogger)
+			return reconcile.Result{}, nil
+		}
+
+		// Resolve the proxy config for each pod. Pods without a proxy will have a nil proxy config value.
+		var podProxies []*httpproxy.Config
+		for _, pod := range pods.Items {
+			for _, container := range pod.Spec.Containers {
+				if container.Name == render.GuardianDeploymentName {
+					var podProxyConfig *httpproxy.Config
+					var httpsProxy, noProxy string
+					for _, env := range container.Env {
+						switch env.Name {
+						case "https_proxy", "HTTPS_PROXY":
+							httpsProxy = env.Value
+						case "no_proxy", "NO_PROXY":
+							noProxy = env.Value
+						}
+					}
+					if httpsProxy != "" || noProxy != "" {
+						podProxyConfig = &httpproxy.Config{
+							HTTPSProxy: httpsProxy,
+							NoProxy:    noProxy,
+						}
+					}
+
+					podProxies = append(podProxies, podProxyConfig)
+				}
+			}
+		}
+
+		r.resolvedPodProxies = podProxies
+	}
+	r.lastAvailabilityTransition = currentAvailabilityTransition
+
 	// Validate that the tier watch is ready before querying the tier to ensure we utilize the cache.
 	if !r.tierWatchReady.IsReady() {
 		r.status.SetDegraded(operatorv1.ResourceNotReady, "Waiting for Tier watch to be established", nil, reqLogger)
 		return reconcile.Result{RequeueAfter: utils.StandardRetry}, nil
 	}
 
+	tierAvailable := false
 	// Ensure the allow-tigera tier exists, before rendering any network policies within it.
-	includeV3NetworkPolicy := false
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: networkpolicy.TigeraComponentTierName}, &v3.Tier{}); err != nil {
-		// The creation of the Tier depends on this controller to reconcile it's non-NetworkPolicy resources so that the
-		// License becomes available. Therefore, if we fail to query the Tier, we exclude NetworkPolicy from reconciliation
-		// and tolerate errors arising from the Tier not being created.
-		if !k8serrors.IsNotFound(err) {
-			r.status.SetDegraded(operatorv1.ResourceReadError, "Error querying allow-tigera tier", err, reqLogger)
-			return reconcile.Result{}, err
-		}
-	} else {
-		includeV3NetworkPolicy = true
-
-		// The Tier has been created, which means that this controller's reconciliation should no longer be a dependency
-		// of the License being deployed. If NetworkPolicy requires license features, it should now be safe to validate
-		// License presence and sufficiency.
-		if networkPolicyRequiresEgressAccessControl(managementClusterConnection, log) {
-			license, err := utils.FetchLicenseKey(ctx, r.Client)
-			if err != nil {
-				if k8serrors.IsNotFound(err) {
-					r.status.SetDegraded(operatorv1.ResourceNotFound, "License not found", err, reqLogger)
-					return reconcile.Result{}, nil
-				}
-				r.status.SetDegraded(operatorv1.ResourceReadError, "Error querying license", err, reqLogger)
-				return reconcile.Result{}, err
-			}
-
-			if !utils.IsFeatureActive(license, common.EgressAccessControlFeature) {
-				r.status.SetDegraded(operatorv1.ResourceReadError, "Feature is not active - License does not support feature: egress-access-control", nil, reqLogger)
-				return reconcile.Result{}, nil
-			}
-		}
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: networkpolicy.TigeraComponentTierName}, &v3.Tier{}); err == nil {
+		tierAvailable = true
+	} else if !k8serrors.IsNotFound(err) {
+		r.status.SetDegraded(operatorv1.ResourceReadError, "Error querying allow-tigera tier", err, reqLogger)
+		return reconcile.Result{}, err
 	}
+
+	licenseActive := false
+	// Ensure the license can support enterprise policy, before rendering any network policies within it.
+	if license, err := utils.FetchLicenseKey(ctx, r.Client); err == nil {
+		if utils.IsFeatureActive(license, common.EgressAccessControlFeature) {
+			licenseActive = true
+		}
+	} else if !k8serrors.IsNotFound(err) {
+		r.status.SetDegraded(operatorv1.ResourceReadError, "Error querying license", err, reqLogger)
+		return reconcile.Result{}, err
+	}
+
+	// The creation of the Tier depends on this controller to reconcile it's non-NetworkPolicy resources so that the
+	// License becomes available. Therefore, if we fail to query the Tier, we exclude NetworkPolicy from reconciliation
+	// and tolerate errors arising from the Tier not being created.
+	includeEgressNetworkPolicy := tierAvailable && licenseActive
 
 	ch := utils.NewComponentHandler(log, r.Client, r.Scheme, managementClusterConnection)
 	guardianCfg := &render.GuardianConfiguration{
 		URL:                         managementClusterConnection.Spec.ManagementClusterAddr,
+		PodProxies:                  r.resolvedPodProxies,
 		TunnelCAType:                managementClusterConnection.Spec.TLS.CA,
 		PullSecrets:                 pullSecrets,
 		OpenShift:                   r.Provider.IsOpenShift(),
@@ -381,7 +450,7 @@ func (r *ReconcileConnection) Reconcile(ctx context.Context, request reconcile.R
 	// In managed clusters, the clusterconnection controller is a dependency for the License to be created. In case the
 	// License is unavailable and reconciliation of non-NetworkPolicy resources in the clusterconnection controller
 	// would resolve it, we render network policies last to prevent a chicken-and-egg scenario.
-	if includeV3NetworkPolicy {
+	if includeEgressNetworkPolicy {
 		policyComponent, err := render.GuardianPolicy(guardianCfg)
 		if err != nil {
 			log.Error(err, "Failed to create NetworkPolicy component for Guardian, policy will be omitted")
@@ -415,28 +484,4 @@ func fillDefaults(mcc *operatorv1.ManagementClusterConnection) {
 	if mcc.Spec.TLS.CA == "" {
 		mcc.Spec.TLS.CA = operatorv1.CATypeTigera
 	}
-}
-
-func networkPolicyRequiresEgressAccessControl(connection *operatorv1.ManagementClusterConnection, log logr.Logger) bool {
-	if clusterAddrHasDomain, err := managementClusterAddrHasDomain(connection); err == nil && clusterAddrHasDomain {
-		return true
-	} else {
-		if err != nil {
-			log.Error(err, fmt.Sprintf(
-				"Failed to parse ManagementClusterAddr. Assuming %s does not require license feature %s",
-				render.GuardianPolicyName,
-				common.EgressAccessControlFeature,
-			))
-		}
-		return false
-	}
-}
-
-func managementClusterAddrHasDomain(connection *operatorv1.ManagementClusterConnection) (bool, error) {
-	host, _, err := net.SplitHostPort(connection.Spec.ManagementClusterAddr)
-	if err != nil {
-		return false, err
-	}
-
-	return net.ParseIP(host) == nil, nil
 }

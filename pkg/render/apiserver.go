@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2019-2025 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,8 +16,10 @@ package render
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
+	admregv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	netv1 "k8s.io/api/networking/v1"
@@ -29,10 +31,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v3 "github.com/tigera/api/pkg/apis/projectcalico/v3"
-
+	"github.com/tigera/api/pkg/lib/numorstring"
 	operatorv1 "github.com/tigera/operator/api/v1"
+	"github.com/tigera/operator/pkg/common"
 	"github.com/tigera/operator/pkg/components"
 	"github.com/tigera/operator/pkg/controller/k8sapi"
+	"github.com/tigera/operator/pkg/render/common/authentication"
 	rcomp "github.com/tigera/operator/pkg/render/common/components"
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
 	"github.com/tigera/operator/pkg/render/common/networkpolicy"
@@ -65,6 +69,8 @@ const (
 	tigeraAPIServerTLSSecretName                    = "tigera-apiserver-certs"
 	APIServerSecretsRBACName                        = "tigera-extension-apiserver-secrets-access"
 	MultiTenantManagedClustersAccessClusterRoleName = "tigera-managed-cluster-access"
+	L7AdmissionControllerContainerName              = "calico-l7-admission-controller"
+	L7AdmissionControllerPort                       = 6443
 )
 
 var TigeraAPIServerEntityRule = v3.EntityRule{
@@ -113,6 +119,7 @@ type APIServerConfiguration struct {
 	Installation                *operatorv1.InstallationSpec
 	APIServer                   *operatorv1.APIServerSpec
 	ForceHostNetwork            bool
+	ApplicationLayer            *operatorv1.ApplicationLayer
 	ManagementCluster           *operatorv1.ManagementCluster
 	ManagementClusterConnection *operatorv1.ManagementClusterConnection
 	TLSKeyPair                  certificatemanagement.KeyPairInterface
@@ -120,12 +127,17 @@ type APIServerConfiguration struct {
 	OpenShift                   bool
 	TrustedBundle               certificatemanagement.TrustedBundle
 	MultiTenant                 bool
+	KeyValidatorConfig          authentication.KeyValidatorConfig
+	KubernetesVersion           *common.VersionInfo
 }
 
 type apiServerComponent struct {
-	cfg              *APIServerConfiguration
-	apiServerImage   string
-	queryServerImage string
+	cfg                             *APIServerConfiguration
+	apiServerImage                  string
+	queryServerImage                string
+	l7AdmissionControllerImage      string
+	l7AdmissionControllerEnvoyImage string
+	dikastesImage                   string
 }
 
 func (c *apiServerComponent) ResolveImages(is *operatorv1.ImageSet) error {
@@ -144,6 +156,20 @@ func (c *apiServerComponent) ResolveImages(is *operatorv1.ImageSet) error {
 		if err != nil {
 			errMsgs = append(errMsgs, err.Error())
 		}
+		if c.cfg.IsSidecarInjectionEnabled() {
+			c.l7AdmissionControllerImage, err = components.GetReference(components.ComponentL7AdmissionController, reg, path, prefix, is)
+			if err != nil {
+				errMsgs = append(errMsgs, err.Error())
+			}
+			c.l7AdmissionControllerEnvoyImage, err = components.GetReference(components.ComponentEnvoyProxy, reg, path, prefix, is)
+			if err != nil {
+				errMsgs = append(errMsgs, err.Error())
+			}
+			c.dikastesImage, err = components.GetReference(components.ComponentDikastes, reg, path, prefix, is)
+			if err != nil {
+				errMsgs = append(errMsgs, err.Error())
+			}
+		}
 	} else {
 		if operatorv1.IsFIPSModeEnabled(c.cfg.Installation.FIPSMode) {
 			c.apiServerImage, err = components.GetReference(components.ComponentCalicoAPIServerFIPS, reg, path, prefix, is)
@@ -159,7 +185,7 @@ func (c *apiServerComponent) ResolveImages(is *operatorv1.ImageSet) error {
 	}
 
 	if len(errMsgs) != 0 {
-		return fmt.Errorf(strings.Join(errMsgs, ","))
+		return fmt.Errorf("%s", strings.Join(errMsgs, ","))
 	}
 	return nil
 }
@@ -220,7 +246,8 @@ func (c *apiServerComponent) Objects() ([]client.Object, []client.Object) {
 
 	// Global enterprise-only objects.
 	globalEnterpriseObjects := []client.Object{
-		CreateNamespace(rmeta.APIServerNamespace(operatorv1.TigeraSecureEnterprise), c.cfg.Installation.KubernetesProvider, PSSPrivileged),
+		CreateNamespace(rmeta.APIServerNamespace(operatorv1.TigeraSecureEnterprise), c.cfg.Installation.KubernetesProvider, PSSPrivileged, c.cfg.Installation.Azure),
+		CreateOperatorSecretsRoleBinding(rmeta.APIServerNamespace(operatorv1.TigeraSecureEnterprise)),
 		c.tigeraApiServerClusterRole(),
 		c.tigeraApiServerClusterRoleBinding(),
 		c.uisettingsgroupGetterClusterRole(),
@@ -266,10 +293,20 @@ func (c *apiServerComponent) Objects() ([]client.Object, []client.Object) {
 	if c.cfg.TrustedBundle != nil {
 		namespacedEnterpriseObjects = append(namespacedEnterpriseObjects, c.cfg.TrustedBundle.ConfigMap(QueryserverNamespace))
 	}
+	if c.cfg.IsSidecarInjectionEnabled() {
+		namespacedEnterpriseObjects = append(namespacedEnterpriseObjects, c.sidecarMutatingWebhookConfig())
+	} else {
+		objsToDelete = append(objsToDelete, &admregv1.MutatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{Name: common.SidecarMutatingWebhookConfigName}})
+	}
 
+	podSecurityNamespaceLabel := PodSecurityStandard(PSSRestricted)
+	if c.hostNetwork() {
+		podSecurityNamespaceLabel = PSSPrivileged
+	}
 	// Global OSS-only objects.
 	globalCalicoObjects := []client.Object{
-		CreateNamespace(rmeta.APIServerNamespace(operatorv1.Calico), c.cfg.Installation.KubernetesProvider, PSSPrivileged),
+		CreateNamespace(rmeta.APIServerNamespace(operatorv1.Calico), c.cfg.Installation.KubernetesProvider, podSecurityNamespaceLabel, c.cfg.Installation.Azure),
+		CreateOperatorSecretsRoleBinding(rmeta.APIServerNamespace(operatorv1.Calico)),
 	}
 
 	// Compile the final arrays based on the variant.
@@ -465,13 +502,38 @@ func allowTigeraAPIServerPolicy(cfg *APIServerConfiguration) *v3.NetworkPolicy {
 			Destination: networkpolicy.PrometheusEntityRule,
 		},
 		{
-			// Pass to subsequent tiers for further enforcement
-			Action: v3.Pass,
+			Action:      v3.Allow,
+			Protocol:    &networkpolicy.TCPProtocol,
+			Destination: DexEntityRule,
 		},
 	}...)
 
+	if cfg.KeyValidatorConfig != nil {
+		if parsedURL, err := url.Parse(cfg.KeyValidatorConfig.Issuer()); err == nil {
+			oidcEgressRule := networkpolicy.GetOIDCEgressRule(parsedURL)
+			egressRules = append(egressRules, oidcEgressRule)
+		}
+	}
+
+	if r, err := cfg.K8SServiceEndpoint.DestinationEntityRule(); r != nil && err == nil {
+		egressRules = append(egressRules, v3.Rule{
+			Action:      v3.Allow,
+			Protocol:    &networkpolicy.TCPProtocol,
+			Destination: *r,
+		})
+	}
+
+	// add pass after all egress rules
+	egressRules = append(egressRules, v3.Rule{
+		// Pass to subsequent tiers for further enforcement
+		Action: v3.Pass,
+	})
+
 	// The ports Calico Enterprise API Server and Calico Enterprise Query Server are configured to listen on.
 	ingressPorts := networkpolicy.Ports(443, APIServerPort, QueryServerPort, 10443)
+	if cfg.IsSidecarInjectionEnabled() {
+		ingressPorts = append(ingressPorts, numorstring.Port{MinPort: L7AdmissionControllerPort, MaxPort: L7AdmissionControllerPort})
+	}
 
 	return &v3.NetworkPolicy{
 		TypeMeta: metav1.TypeMeta{Kind: "NetworkPolicy", APIVersion: "projectcalico.org/v3"},
@@ -534,12 +596,18 @@ func (c *apiServerComponent) calicoCustomResourcesClusterRole() *rbacv1.ClusterR
 		},
 		{
 			// Kubernetes network policy resources.
-			APIGroups: []string{
-				"networking.k8s.io",
+			APIGroups: []string{"networking.k8s.io"},
+			Resources: []string{"networkpolicies"},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
 			},
-			Resources: []string{
-				"networkpolicies",
-			},
+		},
+		{
+			// Kubernetes admin network policy resources.
+			APIGroups: []string{"policy.networking.k8s.io"},
+			Resources: []string{"adminnetworkpolicies", "baselineadminnetworkpolicies"},
 			Verbs: []string{
 				"get",
 				"list",
@@ -552,6 +620,9 @@ func (c *apiServerComponent) calicoCustomResourcesClusterRole() *rbacv1.ClusterR
 			Resources: []string{
 				"globalnetworkpolicies",
 				"networkpolicies",
+				"stagedkubernetesnetworkpolicies",
+				"stagednetworkpolicies",
+				"stagedglobalnetworkpolicies",
 				"caliconodestatuses",
 				"clusterinformations",
 				"hostendpoints",
@@ -580,7 +651,23 @@ func (c *apiServerComponent) calicoCustomResourcesClusterRole() *rbacv1.ClusterR
 			},
 		},
 	}
-
+	if c.cfg.KubernetesVersion == nil || !(c.cfg.KubernetesVersion != nil && c.cfg.KubernetesVersion.Major < 2 && c.cfg.KubernetesVersion.Minor < 30) {
+		// If the kubernetes version is higher than 1.30, we add extra RBAC permissions to allow establishing watches.
+		// https://v1-30.docs.kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/
+		rules = append(rules, rbacv1.PolicyRule{
+			// Kubernetes validating admission policy resources.
+			APIGroups: []string{"admissionregistration.k8s.io"},
+			Resources: []string{
+				"validatingadmissionpolicies",
+				"validatingadmissionpolicybindings",
+			},
+			Verbs: []string{
+				"get",
+				"list",
+				"watch",
+			},
+		})
+	}
 	return &rbacv1.ClusterRole{
 		TypeMeta: metav1.TypeMeta{Kind: "ClusterRole", APIVersion: "rbac.authorization.k8s.io/v1"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -909,6 +996,18 @@ func (c *apiServerComponent) apiServerService() *corev1.Service {
 			},
 		)
 	}
+
+	if c.cfg.IsSidecarInjectionEnabled() {
+		s.Spec.Ports = append(s.Spec.Ports,
+			corev1.ServicePort{
+				Name:       "l7admctrl",
+				Port:       L7AdmissionControllerPort,
+				Protocol:   corev1.ProtocolTCP,
+				TargetPort: intstr.FromInt(L7AdmissionControllerPort),
+			},
+		)
+	}
+
 	return s
 }
 
@@ -917,9 +1016,11 @@ func (c *apiServerComponent) apiServerDeployment() *appsv1.Deployment {
 	name, _ := c.resourceNameBasedOnVariant("tigera-apiserver", "calico-apiserver")
 	hostNetwork := c.hostNetwork()
 	dnsPolicy := corev1.DNSClusterFirst
+	deploymentStrategyType := appsv1.RollingUpdateDeploymentStrategyType
 	if hostNetwork {
 		// Adjust DNS policy so we can access in-cluster services.
 		dnsPolicy = corev1.DNSClusterFirstWithHostNet
+		deploymentStrategyType = appsv1.RecreateDeploymentStrategyType
 	}
 
 	var initContainers []corev1.Container
@@ -934,6 +1035,14 @@ func (c *apiServerComponent) apiServerDeployment() *appsv1.Deployment {
 		c.cfg.TLSKeyPair.HashAnnotationKey(): c.cfg.TLSKeyPair.HashAnnotationValue(),
 	}
 
+	containers := []corev1.Container{
+		c.apiServerContainer(),
+	}
+
+	if c.cfg.IsSidecarInjectionEnabled() {
+		containers = append(containers, c.l7AdmissionControllerContainer())
+	}
+
 	d := &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{Kind: "Deployment", APIVersion: "apps/v1"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -946,7 +1055,7 @@ func (c *apiServerComponent) apiServerDeployment() *appsv1.Deployment {
 		Spec: appsv1.DeploymentSpec{
 			Replicas: c.cfg.Installation.ControlPlaneReplicas,
 			Strategy: appsv1.DeploymentStrategy{
-				Type: appsv1.RecreateDeploymentStrategyType,
+				Type: deploymentStrategyType,
 			},
 			Selector: c.deploymentSelector(),
 			Template: corev1.PodTemplateSpec{
@@ -966,10 +1075,8 @@ func (c *apiServerComponent) apiServerDeployment() *appsv1.Deployment {
 					Tolerations:        c.tolerations(),
 					ImagePullSecrets:   secret.GetReferenceList(c.cfg.PullSecrets),
 					InitContainers:     initContainers,
-					Containers: []corev1.Container{
-						c.apiServerContainer(),
-					},
-					Volumes: c.apiServerVolumes(),
+					Containers:         containers,
+					Volumes:            c.apiServerVolumes(),
 				},
 			},
 		},
@@ -995,6 +1102,65 @@ func (c *apiServerComponent) apiServerDeployment() *appsv1.Deployment {
 	}
 
 	return d
+}
+
+// apiServer creates a MutatingWebhookConfiguration for sidecars.
+func (c *apiServerComponent) sidecarMutatingWebhookConfig() *admregv1.MutatingWebhookConfiguration {
+	var cacert []byte
+	var svcPort int32 = L7AdmissionControllerPort
+
+	svcpath := "/sidecar-webhook"
+	svcref := admregv1.ServiceReference{
+		Name:      QueryserverServiceName,
+		Namespace: QueryserverNamespace,
+		Path:      &svcpath,
+		Port:      &svcPort,
+	}
+	failpol := admregv1.Fail
+	labelsel := metav1.LabelSelector{
+		MatchLabels: map[string]string{
+			"applicationlayer.projectcalico.org/sidecar": "true",
+		},
+	}
+	rules := []admregv1.RuleWithOperations{
+		{
+			Rule: admregv1.Rule{
+				APIGroups:   []string{""},
+				APIVersions: []string{"v1"},
+				Resources:   []string{"pods"},
+			},
+			Operations: []admregv1.OperationType{admregv1.Create},
+		},
+	}
+	sidefx := admregv1.SideEffectClassNone
+	if !c.cfg.TLSKeyPair.UseCertificateManagement() {
+		cacert = c.cfg.TLSKeyPair.GetIssuer().GetCertificatePEM()
+	} else {
+		cacert = c.cfg.Installation.CertificateManagement.CACert
+	}
+	mwc := admregv1.MutatingWebhookConfiguration{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "MutatingWebhookConfiguration",
+			APIVersion: "admissionregistration.k8s.io/v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: common.SidecarMutatingWebhookConfigName},
+		Webhooks: []admregv1.MutatingWebhook{
+			{
+				AdmissionReviewVersions: []string{"v1"},
+				ClientConfig: admregv1.WebhookClientConfig{
+					Service:  &svcref,
+					CABundle: cacert,
+				},
+				Name:           "sidecar.projectcalico.org",
+				FailurePolicy:  &failpol,
+				ObjectSelector: &labelsel,
+				Rules:          rules,
+				SideEffects:    &sidefx,
+			},
+		},
+	}
+
+	return &mwc
 }
 
 func (c *apiServerComponent) hostNetwork() bool {
@@ -1031,6 +1197,16 @@ func (c *apiServerComponent) apiServerContainer() corev1.Container {
 	}
 
 	env = append(env, c.cfg.K8SServiceEndpoint.EnvVars(c.hostNetwork(), c.cfg.Installation.KubernetesProvider)...)
+
+	// set Log_LEVEL for apiserver container
+	if logging := c.cfg.APIServer.Logging; logging != nil &&
+		logging.APIServerLogging != nil && logging.APIServerLogging.LogSeverity != nil {
+		env = append(env,
+			corev1.EnvVar{Name: "LOG_LEVEL", Value: strings.ToLower(string(*logging.APIServerLogging.LogSeverity))})
+	} else {
+		// set default LOG_LEVEL to info when not set by the user
+		env = append(env, corev1.EnvVar{Name: "LOG_LEVEL", Value: "info"})
+	}
 
 	if c.cfg.Installation.CalicoNetwork != nil && c.cfg.Installation.CalicoNetwork.MultiInterfaceMode != nil {
 		env = append(env, corev1.EnvVar{Name: "MULTI_INTERFACE_MODE", Value: c.cfg.Installation.CalicoNetwork.MultiInterfaceMode.Value()})
@@ -1091,20 +1267,21 @@ func (c *apiServerComponent) startUpArgs() []string {
 			args = append(args, fmt.Sprintf("--tunnelSecretName=%s", c.cfg.ManagementCluster.Spec.TLS.SecretName))
 		}
 	}
-
+	if c.cfg.KubernetesVersion != nil && c.cfg.KubernetesVersion.Major < 2 && c.cfg.KubernetesVersion.Minor < 30 {
+		// Disable this API as it is not available by default. If we don't, the server fails to start, due to trying to
+		// establish watches for unavailable APIs.
+		args = append(args, "--enable-validating-admission-policy=false")
+	}
 	return args
 }
 
 // queryServerContainer creates the query server container.
 func (c *apiServerComponent) queryServerContainer() corev1.Container {
 	env := []corev1.EnvVar{
-		// Set queryserver logging to "info"
-		{Name: "LOGLEVEL", Value: "info"},
 		{Name: "DATASTORE_TYPE", Value: "kubernetes"},
 		{Name: "LISTEN_ADDR", Value: fmt.Sprintf(":%d", QueryServerPort)},
 		{Name: "TLS_CERT", Value: fmt.Sprintf("/%s/tls.crt", ProjectCalicoAPIServerTLSSecretName(c.cfg.Installation.Variant))},
 		{Name: "TLS_KEY", Value: fmt.Sprintf("/%s/tls.key", ProjectCalicoAPIServerTLSSecretName(c.cfg.Installation.Variant))},
-		{Name: "FIPS_MODE_ENABLED", Value: operatorv1.IsFIPSModeEnabledString(c.cfg.Installation.FIPSMode)},
 	}
 	if c.cfg.TrustedBundle != nil {
 		env = append(env, corev1.EnvVar{Name: "TRUSTED_BUNDLE_PATH", Value: c.cfg.TrustedBundle.MountPath()})
@@ -1114,6 +1291,20 @@ func (c *apiServerComponent) queryServerContainer() corev1.Container {
 
 	if c.cfg.Installation.CalicoNetwork != nil && c.cfg.Installation.CalicoNetwork.MultiInterfaceMode != nil {
 		env = append(env, corev1.EnvVar{Name: "MULTI_INTERFACE_MODE", Value: c.cfg.Installation.CalicoNetwork.MultiInterfaceMode.Value()})
+	}
+
+	if c.cfg.KeyValidatorConfig != nil {
+		env = append(env, c.cfg.KeyValidatorConfig.RequiredEnv("")...)
+	}
+
+	// set LogLEVEL for queryserver container
+	if logging := c.cfg.APIServer.Logging; logging != nil &&
+		logging.QueryServerLogging != nil && logging.QueryServerLogging.LogSeverity != nil {
+		env = append(env,
+			corev1.EnvVar{Name: "LOGLEVEL", Value: strings.ToLower(string(*logging.QueryServerLogging.LogSeverity))})
+	} else {
+		// set default LOGLEVEL to info when not set by the user
+		env = append(env, corev1.EnvVar{Name: "LOGLEVEL", Value: "info"})
 	}
 
 	volumeMounts := []corev1.VolumeMount{
@@ -1190,7 +1381,11 @@ func (c *apiServerComponent) tolerations() []corev1.Toleration {
 	if c.hostNetwork() {
 		return rmeta.TolerateAll
 	}
-	return append(c.cfg.Installation.ControlPlaneTolerations, rmeta.TolerateControlPlane...)
+	tolerations := append(c.cfg.Installation.ControlPlaneTolerations, rmeta.TolerateControlPlane...)
+	if c.cfg.Installation.KubernetesProvider.IsGKE() {
+		tolerations = append(tolerations, rmeta.TolerateGKEARM64NoSchedule)
+	}
+	return tolerations
 }
 
 // networkPolicy returns a NP to allow traffic to the API server. This prevents it from
@@ -1229,9 +1424,6 @@ func (c *apiServerComponent) tigeraApiServerClusterRole() *rbacv1.ClusterRole {
 			// Calico Enterprise backing storage.
 			APIGroups: []string{"crd.projectcalico.org"},
 			Resources: []string{
-				"stagedkubernetesnetworkpolicies",
-				"stagednetworkpolicies",
-				"stagedglobalnetworkpolicies",
 				"licensekeys",
 				"alertexceptions",
 				"globalalerts",
@@ -1252,6 +1444,7 @@ func (c *apiServerComponent) tigeraApiServerClusterRole() *rbacv1.ClusterRole {
 				"externalnetworks",
 				"egressgatewaypolicies",
 				"securityeventwebhooks",
+				"bfdconfigurations",
 			},
 			Verbs: []string{
 				"get",
@@ -1454,6 +1647,19 @@ func (c *apiServerComponent) tigeraUserClusterRole() *rbacv1.ClusterRole {
 			Resources: []string{"pods"},
 			Verbs:     []string{"list"},
 		},
+		// Additional "list" requests required to view serviceaccount labels.
+		{
+			APIGroups: []string{""},
+			Resources: []string{"serviceaccounts"},
+			Verbs:     []string{"list"},
+		},
+		// Access for WAF API to read in coreruleset configmap
+		{
+			APIGroups:     []string{""},
+			Resources:     []string{"configmaps"},
+			ResourceNames: []string{"coreruleset-default"},
+			Verbs:         []string{"get"},
+		},
 		// Access to statistics.
 		{
 			APIGroups: []string{""},
@@ -1483,6 +1689,12 @@ func (c *apiServerComponent) tigeraUserClusterRole() *rbacv1.ClusterRole {
 		{
 			APIGroups: []string{"projectcalico.org"},
 			Resources: []string{"clusterinformations"},
+			Verbs:     []string{"get", "list"},
+		},
+		// Access to hostendpoints from the UI ServiceGraph.
+		{
+			APIGroups: []string{"projectcalico.org"},
+			Resources: []string{"hostendpoints"},
 			Verbs:     []string{"get", "list"},
 		},
 		// List and view the threat defense configuration
@@ -1632,6 +1844,19 @@ func (c *apiServerComponent) tigeraNetworkAdminClusterRole() *rbacv1.ClusterRole
 			Resources: []string{"pods"},
 			Verbs:     []string{"list"},
 		},
+		// Additional "list" requests required to view serviceaccount labels.
+		{
+			APIGroups: []string{""},
+			Resources: []string{"serviceaccounts"},
+			Verbs:     []string{"list"},
+		},
+		// Access for WAF API to read in coreruleset configmap
+		{
+			APIGroups:     []string{""},
+			Resources:     []string{"configmaps"},
+			ResourceNames: []string{"coreruleset-default"},
+			Verbs:         []string{"get"},
+		},
 		// Access to statistics.
 		{
 			APIGroups: []string{""},
@@ -1662,6 +1887,12 @@ func (c *apiServerComponent) tigeraNetworkAdminClusterRole() *rbacv1.ClusterRole
 		{
 			APIGroups: []string{"projectcalico.org"},
 			Resources: []string{"clusterinformations"},
+			Verbs:     []string{"get", "list"},
+		},
+		// Access to hostendpoints from the UI ServiceGraph.
+		{
+			APIGroups: []string{"projectcalico.org"},
+			Resources: []string{"hostendpoints"},
 			Verbs:     []string{"get", "list"},
 		},
 		// Manage the threat defense configuration
@@ -2010,4 +2241,52 @@ func (c *apiServerComponent) getDeprecatedResources() []client.Object {
 	}
 
 	return renamedRscList
+}
+
+func (cfg *APIServerConfiguration) IsSidecarInjectionEnabled() bool {
+	return cfg.ApplicationLayer != nil &&
+		cfg.ApplicationLayer.Spec.SidecarInjection != nil &&
+		*cfg.ApplicationLayer.Spec.SidecarInjection == operatorv1.SidecarEnabled
+}
+
+func (c *apiServerComponent) l7AdmissionControllerContainer() corev1.Container {
+	volumeMounts := []corev1.VolumeMount{
+		c.cfg.TLSKeyPair.VolumeMount(c.SupportedOSType()),
+	}
+
+	l7AdmssCtrl := corev1.Container{
+		Name:            L7AdmissionControllerContainerName,
+		Image:           c.l7AdmissionControllerImage,
+		ImagePullPolicy: ImagePullPolicy(),
+		Env: []corev1.EnvVar{
+			{
+				Name:  "L7ADMCTRL_TLSCERTPATH",
+				Value: c.cfg.TLSKeyPair.VolumeMountCertificateFilePath(),
+			},
+			{
+				Name:  "L7ADMCTRL_TLSKEYPATH",
+				Value: c.cfg.TLSKeyPair.VolumeMountKeyFilePath(),
+			},
+			{
+				Name:  "L7ADMCTRL_ENVOYIMAGE",
+				Value: c.l7AdmissionControllerEnvoyImage,
+			},
+			{
+				Name:  "L7ADMCTRL_DIKASTESIMAGE",
+				Value: c.dikastesImage,
+			},
+		},
+		VolumeMounts: volumeMounts,
+		LivenessProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{
+					Path:   "/live",
+					Port:   intstr.FromInt(L7AdmissionControllerPort),
+					Scheme: corev1.URISchemeHTTPS,
+				},
+			},
+		},
+	}
+
+	return l7AdmssCtrl
 }

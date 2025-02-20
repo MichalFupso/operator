@@ -31,6 +31,7 @@ import (
 	"github.com/tigera/operator/pkg/components"
 	"github.com/tigera/operator/pkg/ptr"
 	"github.com/tigera/operator/pkg/render"
+	rcomponents "github.com/tigera/operator/pkg/render/common/components"
 	"github.com/tigera/operator/pkg/render/common/elasticsearch"
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
 	"github.com/tigera/operator/pkg/render/common/networkpolicy"
@@ -81,6 +82,7 @@ type Config struct {
 	EsAdminUserName            string
 	Namespace                  string
 	TruthNamespace             string
+	LogStorage                 *operatorv1.LogStorage
 }
 
 func (e *esGateway) ResolveImages(is *operatorv1.ImageSet) error {
@@ -101,7 +103,7 @@ func (e *esGateway) ResolveImages(is *operatorv1.ImageSet) error {
 		}
 	}
 	if len(errMsgs) != 0 {
-		return fmt.Errorf(strings.Join(errMsgs, ","))
+		return fmt.Errorf("%s", strings.Join(errMsgs, ","))
 	}
 	return nil
 }
@@ -205,7 +207,6 @@ func (e *esGateway) esGatewayDeployment() *appsv1.Deployment {
 				Key: e.cfg.EsAdminUserName,
 			},
 		}},
-		{Name: "ES_GATEWAY_FIPS_MODE_ENABLED", Value: operatorv1.IsFIPSModeEnabledString(e.cfg.Installation.FIPSMode)},
 	}
 
 	var initContainers []corev1.Container
@@ -225,6 +226,12 @@ func (e *esGateway) esGatewayDeployment() *appsv1.Deployment {
 
 	annotations := e.cfg.TrustedBundle.HashAnnotations()
 	annotations[e.cfg.ESGatewayKeyPair.HashAnnotationKey()] = e.cfg.ESGatewayKeyPair.HashAnnotationValue()
+
+	tolerations := e.cfg.Installation.ControlPlaneTolerations
+	if e.cfg.Installation.KubernetesProvider.IsGKE() {
+		tolerations = append(tolerations, rmeta.TolerateGKEARM64NoSchedule)
+	}
+
 	podTemplate := &corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        DeploymentName,
@@ -232,7 +239,7 @@ func (e *esGateway) esGatewayDeployment() *appsv1.Deployment {
 			Annotations: annotations,
 		},
 		Spec: corev1.PodSpec{
-			Tolerations:        e.cfg.Installation.ControlPlaneTolerations,
+			Tolerations:        tolerations,
 			NodeSelector:       e.cfg.Installation.ControlPlaneNodeSelector,
 			ServiceAccountName: ServiceAccountName,
 			ImagePullSecrets:   secret.GetReferenceList(e.cfg.PullSecrets),
@@ -265,7 +272,7 @@ func (e *esGateway) esGatewayDeployment() *appsv1.Deployment {
 		podTemplate.Spec.Affinity = podaffinity.NewPodAntiAffinity(DeploymentName, e.cfg.Namespace)
 	}
 
-	return &appsv1.Deployment{
+	d := appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{Kind: "Deployment", APIVersion: "apps/v1"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      DeploymentName,
@@ -286,6 +293,15 @@ func (e *esGateway) esGatewayDeployment() *appsv1.Deployment {
 			Replicas: e.cfg.Installation.ControlPlaneReplicas,
 		},
 	}
+
+	if e.cfg.LogStorage != nil {
+		if overrides := e.cfg.LogStorage.Spec.ESGatewayDeployment; overrides != nil {
+			rcomponents.ApplyDeploymentOverrides(&d, overrides)
+		}
+	}
+
+	return &d
+
 }
 
 func (e *esGateway) esGatewayServiceAccount() *corev1.ServiceAccount {

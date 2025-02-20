@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2020-2025 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -101,13 +101,6 @@ var (
 		Registry: "{{ .Registry }}",
 	}
 {{- end }}
-{{ with .Components.elasticsearch }}
-	ComponentElasticsearchFIPS = Component{
-		Version:  "{{ .Version }}-fips",
-		Image:    "{{ .Image }}",
-		Registry: "{{ .Registry }}",
-	}
-{{- end }}
 {{ with index .Components "eck-elasticsearch-operator" }}
 	ComponentECKElasticsearchOperator = Component{
 		Version:  "{{ .Version }}",
@@ -121,8 +114,8 @@ var (
 		Registry: "{{ .Registry }}",
 	}
 {{- end }}
-{{ with index .Components "es-proxy" }}
-	ComponentEsProxy = Component{
+{{ with index .Components "ui-apis" }}
+	ComponentUIAPIs = Component{
 		Version:  "{{ .Version }}",
 		Image:    "{{ .Image }}",
 		Registry: "{{ .Registry }}",
@@ -170,7 +163,7 @@ var (
 		Registry: "{{ .Registry }}",
 	}
 {{- end }}
-{{ with index .Components "security-event-webhooks-processor" }}
+{{ with index .Components "webhooks-processor" }}
 	ComponentSecurityEventWebhooksProcessor = Component{
 		Version:  "{{ .Version }}",
 		Image:    "{{ .Image }}",
@@ -242,6 +235,13 @@ var (
 {{- end }}
 {{ with index .Components "dikastes" }}
 	ComponentDikastes = Component{
+		Version:  "{{ .Version }}",
+		Image:    "{{ .Image }}",
+		Registry: "{{ .Registry }}",
+	}
+{{- end }}
+{{ with index .Components "l7-admission-controller" }}
+	ComponentL7AdmissionController = Component{
 		Version:  "{{ .Version }}",
 		Image:    "{{ .Image }}",
 		Registry: "{{ .Registry }}",
@@ -322,13 +322,6 @@ var (
 		Registry: "{{ .Registry }}",
 	}
 {{- end }}
-{{ with index .Components "tigera-cni" }}
-	ComponentTigeraCNIFIPS = Component{
-		Version:  "{{ .Version }}-fips",
-		Image:    "{{ .Image }}",
-		Registry: "{{ .Registry }}",
-	}
-{{- end }}
 {{ with index .Components "tigera-cni-windows" }}
 	ComponentTigeraCNIWindows = Component{
 		Version:  "{{ .Version }}",
@@ -364,6 +357,27 @@ var (
 		Registry: "{{ .Registry }}",
 	}
 {{- end }}
+{{ with index .Components "gateway-api-envoy-gateway" }}
+	ComponentGatewayAPIEnvoyGateway = Component{
+		Version:  "{{ .Version }}",
+		Image:    "{{ .Image }}",
+		Registry: "{{ .Registry }}",
+	}
+{{- end }}
+{{ with index .Components "gateway-api-envoy-proxy" }}
+	ComponentGatewayAPIEnvoyProxy = Component{
+		Version:  "{{ .Version }}",
+		Image:    "{{ .Image }}",
+		Registry: "{{ .Registry }}",
+	}
+{{- end }}
+{{ with index .Components "gateway-api-envoy-ratelimit" }}
+	ComponentGatewayAPIEnvoyRatelimit = Component{
+		Version:  "{{ .Version }}",
+		Image:    "{{ .Image }}",
+		Registry: "{{ .Registry }}",
+	}
+{{- end }}
 	// Only components that correspond directly to images should be included in this list,
 	// Components that are only for providing a version should be left out of this list.
 	EnterpriseImages = []Component{
@@ -377,9 +391,8 @@ var (
 		ComponentDeepPacketInspection,
 		ComponentElasticTseeInstaller,
 		ComponentElasticsearch,
-		ComponentElasticsearchFIPS,
 		ComponentElasticsearchOperator,
-		ComponentEsProxy,
+		ComponentUIAPIs,
 		ComponentFluentd,
 		ComponentFluentdWindows,
 		ComponentGuardian,
@@ -403,14 +416,17 @@ var (
 		ComponentTigeraNodeWindows,
 		ComponentTigeraTypha,
 		ComponentTigeraCNI,
-		ComponentTigeraCNIFIPS,
 		ComponentTigeraCNIWindows,
 		ComponentElasticsearchMetrics,
 		ComponentESGateway,
 		ComponentLinseed,
 		ComponentDikastes,
+		ComponentL7AdmissionController,
 		ComponentTigeraFlexVolume,
 		ComponentTigeraCSI,
 		ComponentTigeraCSINodeDriverRegistrar,
+		ComponentGatewayAPIEnvoyGateway,
+		ComponentGatewayAPIEnvoyProxy,
+		ComponentGatewayAPIEnvoyRatelimit,
 	}
 )

@@ -248,6 +248,9 @@ var _ = Describe("Windows rendering tests", func() {
 				// The DaemonSet should have the correct configuration.
 				ds := dsResource.(*appsv1.DaemonSet)
 
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 				// The calico-node-windows daemonset has 3 containers (felix, node and confd).
 				// confd is only instantiated if using BGP.
 				numContainers := 3
@@ -411,7 +414,6 @@ var _ = Describe("Windows rendering tests", func() {
 					{Name: "FELIX_TYPHACAFILE", Value: certificatemanagement.TrustedCertBundleMountPath},
 					{Name: "FELIX_TYPHACERTFILE", Value: "/node-certs/tls.crt"},
 					{Name: "FELIX_TYPHAKEYFILE", Value: "/node-certs/tls.key"},
-					{Name: "FIPS_MODE_ENABLED", Value: "false"},
 
 					{Name: "VXLAN_VNI", Value: "4096"},
 					{Name: "VXLAN_ADAPTER", Value: ""},
@@ -711,6 +713,9 @@ var _ = Describe("Windows rendering tests", func() {
 				// The DaemonSet should have the correct configuration.
 				ds := rtest.GetResource(resources, "calico-node-windows", "calico-system", "apps", "v1", "DaemonSet").(*appsv1.DaemonSet)
 
+				// The pod template should have node critical priority
+				Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 				// The calico-node-windows daemonset has 3 containers (felix, node and confd).
 				// confd is only instantiated if using BGP.
 				numContainers := 3
@@ -874,7 +879,6 @@ var _ = Describe("Windows rendering tests", func() {
 					{Name: "FELIX_TYPHACAFILE", Value: certificatemanagement.TrustedCertBundleMountPath},
 					{Name: "FELIX_TYPHACERTFILE", Value: "/node-certs/tls.crt"},
 					{Name: "FELIX_TYPHAKEYFILE", Value: "/node-certs/tls.key"},
-					{Name: "FIPS_MODE_ENABLED", Value: "false"},
 
 					{Name: "VXLAN_VNI", Value: "4096"},
 					{Name: "VXLAN_ADAPTER", Value: ""},
@@ -1145,6 +1149,9 @@ var _ = Describe("Windows rendering tests", func() {
 		// The DaemonSet should have the correct configuration.
 		ds := dsResource.(*appsv1.DaemonSet)
 
+		// The pod template should have node critical priority
+		Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 		// The calico-node-windows daemonset has 2 containers (felix, node) when using VXLAN
 		Expect(ds.Spec.Template.Spec.Containers).To(HaveLen(2))
 
@@ -1197,7 +1204,6 @@ var _ = Describe("Windows rendering tests", func() {
 			{Name: "FELIX_TYPHACAFILE", Value: certificatemanagement.TrustedCertBundleMountPath},
 			{Name: "FELIX_TYPHACERTFILE", Value: "/node-certs/tls.crt"},
 			{Name: "FELIX_TYPHAKEYFILE", Value: "/node-certs/tls.key"},
-			{Name: "FIPS_MODE_ENABLED", Value: "false"},
 
 			{Name: "VXLAN_VNI", Value: "4096"},
 			{Name: "VXLAN_ADAPTER", Value: ""},
@@ -1352,6 +1358,9 @@ var _ = Describe("Windows rendering tests", func() {
 		// The DaemonSet should have the correct configuration.
 		ds := dsResource.(*appsv1.DaemonSet)
 
+		// The pod template should have node critical priority
+		Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 		// CNI install container should not be present.
 		cniContainer := rtest.GetContainer(ds.Spec.Template.Spec.InitContainers, "install-cni")
 		Expect(cniContainer).To(BeNil())
@@ -1395,7 +1404,6 @@ var _ = Describe("Windows rendering tests", func() {
 			{Name: "FELIX_TYPHAKEYFILE", Value: "/node-certs/tls.key"},
 			{Name: "FELIX_ROUTESOURCE", Value: "WorkloadIPs"},
 			{Name: "FELIX_BPFEXTTOSERVICECONNMARK", Value: "0x80"},
-			{Name: "FIPS_MODE_ENABLED", Value: "false"},
 
 			{Name: "VXLAN_VNI", Value: "4096"},
 			{Name: "VXLAN_ADAPTER", Value: ""},
@@ -1492,6 +1500,9 @@ var _ = Describe("Windows rendering tests", func() {
 			// The DaemonSet should have the correct configuration.
 			ds := dsResource.(*appsv1.DaemonSet)
 
+			// The pod template should have node critical priority
+			Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 			// CNI install container should not be present.
 			cniContainer := rtest.GetContainer(ds.Spec.Template.Spec.InitContainers, "install-cni")
 			Expect(cniContainer).To(BeNil())
@@ -1543,6 +1554,10 @@ var _ = Describe("Windows rendering tests", func() {
 
 		// The DaemonSet should have the correct configuration.
 		ds := rtest.GetResource(resources, "calico-node-windows", "calico-system", "apps", "v1", "DaemonSet").(*appsv1.DaemonSet)
+
+		// The pod template should have node critical priority
+		Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 		felixContainer := rtest.GetContainer(ds.Spec.Template.Spec.Containers, "felix")
 		Expect(felixContainer.Image).To(Equal(fmt.Sprintf("docker.io/%s:%s", components.ComponentCalicoNodeWindows.Image, components.ComponentCalicoNodeWindows.Version)))
 		nodeContainer := rtest.GetContainer(ds.Spec.Template.Spec.Containers, "node")
@@ -1632,8 +1647,6 @@ var _ = Describe("Windows rendering tests", func() {
 			{Name: "FELIX_TYPHACERTFILE", Value: "/node-certs/tls.crt"},
 			{Name: "FELIX_TYPHAKEYFILE", Value: "/node-certs/tls.key"},
 
-			{Name: "FIPS_MODE_ENABLED", Value: "false"},
-
 			// Calico Windows specific envvars
 			{Name: "VXLAN_VNI", Value: "4096"},
 			{Name: "VXLAN_ADAPTER", Value: ""},
@@ -1680,6 +1693,10 @@ var _ = Describe("Windows rendering tests", func() {
 
 		// The DaemonSet should have the correct configuration.
 		ds := rtest.GetResource(resources, "calico-node-windows", "calico-system", "apps", "v1", "DaemonSet").(*appsv1.DaemonSet)
+
+		// The pod template should have node critical priority
+		Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 		felixContainer := rtest.GetContainer(ds.Spec.Template.Spec.Containers, "felix")
 		Expect(felixContainer.Image).To(Equal(fmt.Sprintf("%s%s:%s", components.TigeraRegistry, components.ComponentTigeraNodeWindows.Image, components.ComponentTigeraNodeWindows.Version)))
 		nodeContainer := rtest.GetContainer(ds.Spec.Template.Spec.Containers, "node")
@@ -1771,8 +1788,6 @@ var _ = Describe("Windows rendering tests", func() {
 			{Name: "FELIX_TYPHACERTFILE", Value: "/node-certs/tls.crt"},
 			{Name: "FELIX_TYPHAKEYFILE", Value: "/node-certs/tls.key"},
 
-			{Name: "FIPS_MODE_ENABLED", Value: "false"},
-
 			{Name: "FELIX_DNSTRUSTEDSERVERS", Value: "k8s-service:openshift-dns/dns-default"},
 
 			// Tigera-specific envvars
@@ -1832,6 +1847,10 @@ var _ = Describe("Windows rendering tests", func() {
 
 		// The DaemonSet should have the correct configuration.
 		ds := rtest.GetResource(resources, "calico-node-windows", "calico-system", "apps", "v1", "DaemonSet").(*appsv1.DaemonSet)
+
+		// The pod template should have node critical priority
+		Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 		felixContainer := rtest.GetContainer(ds.Spec.Template.Spec.Containers, "felix")
 		Expect(felixContainer.Image).To(Equal(fmt.Sprintf("%s%s:%s", components.TigeraRegistry, components.ComponentTigeraNodeWindows.Image, components.ComponentTigeraNodeWindows.Version)))
 		nodeContainer := rtest.GetContainer(ds.Spec.Template.Spec.Containers, "node")
@@ -1923,8 +1942,6 @@ var _ = Describe("Windows rendering tests", func() {
 			{Name: "FELIX_TYPHACERTFILE", Value: "/node-certs/tls.crt"},
 			{Name: "FELIX_TYPHAKEYFILE", Value: "/node-certs/tls.key"},
 
-			{Name: "FIPS_MODE_ENABLED", Value: "false"},
-
 			{Name: "FELIX_DNSTRUSTEDSERVERS", Value: "k8s-service:kube-system/rke2-coredns-rke2-coredns"},
 
 			// Tigera-specific envvars
@@ -1967,6 +1984,10 @@ var _ = Describe("Windows rendering tests", func() {
 
 			// The DaemonSet should have the correct configuration.
 			ds := dsResource.(*appsv1.DaemonSet)
+
+			// The pod template should have node critical priority
+			Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 			Expect(ds.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms).To(ContainElement(
 				corev1.NodeSelectorTerm{
 					MatchExpressions: []corev1.NodeSelectorRequirement{{
@@ -1990,6 +2011,10 @@ var _ = Describe("Windows rendering tests", func() {
 
 			// The DaemonSet should have the correct configuration.
 			ds := dsResource.(*appsv1.DaemonSet)
+
+			// The pod template should have node critical priority
+			Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 			Expect(ds.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms).To(ContainElement(
 				corev1.NodeSelectorTerm{
 					MatchExpressions: []corev1.NodeSelectorRequirement{{
@@ -2016,6 +2041,10 @@ var _ = Describe("Windows rendering tests", func() {
 
 			// The DaemonSet should have the correct configuration.
 			ds := dsResource.(*appsv1.DaemonSet)
+
+			// The pod template should have node critical priority
+			Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 			felixContainer := rtest.GetContainer(ds.Spec.Template.Spec.Containers, "felix")
 			rtest.ExpectEnv(felixContainer.Env, "IP_AUTODETECTION_METHOD", "can-reach=1.1.1.1")
 		})
@@ -2033,6 +2062,10 @@ var _ = Describe("Windows rendering tests", func() {
 
 			// The DaemonSet should have the correct configuration.
 			ds := dsResource.(*appsv1.DaemonSet)
+
+			// The pod template should have node critical priority
+			Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 			felixContainer := rtest.GetContainer(ds.Spec.Template.Spec.Containers, "felix")
 			rtest.ExpectEnv(felixContainer.Env, "IP_AUTODETECTION_METHOD", "interface=eth*")
 		})
@@ -2050,6 +2083,10 @@ var _ = Describe("Windows rendering tests", func() {
 
 			// The DaemonSet should have the correct configuration.
 			ds := dsResource.(*appsv1.DaemonSet)
+
+			// The pod template should have node critical priority
+			Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 			felixContainer := rtest.GetContainer(ds.Spec.Template.Spec.Containers, "felix")
 			rtest.ExpectEnv(felixContainer.Env, "IP_AUTODETECTION_METHOD", "skip-interface=eth*")
 		})
@@ -2067,6 +2104,10 @@ var _ = Describe("Windows rendering tests", func() {
 
 			// The DaemonSet should have the correct configuration.
 			ds := dsResource.(*appsv1.DaemonSet)
+
+			// The pod template should have node critical priority
+			Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 			felixContainer := rtest.GetContainer(ds.Spec.Template.Spec.Containers, "felix")
 			rtest.ExpectEnv(felixContainer.Env, "IP_AUTODETECTION_METHOD", "cidr=10.0.1.0/24,10.0.2.0/24")
 		})
@@ -2368,6 +2409,10 @@ var _ = Describe("Windows rendering tests", func() {
 
 		// The DaemonSet should have the correct configuration.
 		ds := dsResource.(*appsv1.DaemonSet)
+
+		// The pod template should have node critical priority
+		Expect(ds.Spec.Template.Spec.PriorityClassName).To(Equal(render.NodePriorityClassName))
+
 		nodeContainer := rtest.GetContainer(ds.Spec.Template.Spec.Containers, "node")
 		felixContainer := rtest.GetContainer(ds.Spec.Template.Spec.Containers, "node")
 
@@ -2398,7 +2443,6 @@ var _ = Describe("Windows rendering tests", func() {
 			{Name: "USE_POD_CIDR", Value: "true"},
 			{Name: "FELIX_DEFAULTENDPOINTTOHOSTACTION", Value: "ACCEPT"},
 			{Name: "FELIX_HEALTHENABLED", Value: "true"},
-			{Name: "FIPS_MODE_ENABLED", Value: "false"},
 			{
 				Name: "NODENAME",
 				ValueFrom: &corev1.EnvVarSource{

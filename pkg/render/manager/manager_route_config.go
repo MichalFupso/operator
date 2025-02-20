@@ -1,4 +1,4 @@
-// Copyright (c) 2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2024-2025 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -290,6 +290,9 @@ func (builder *voltronRouteConfigBuilder) Build() (*VoltronRouteConfig, error) {
 		return nil, err
 	}
 
+	sort.Sort(ByVolumeMountName(builder.volumeMounts))
+	sort.Sort(ByVolumeName(builder.volumes))
+
 	return &VoltronRouteConfig{
 		routesData:   routesData,
 		volumeMounts: builder.volumeMounts,
@@ -443,7 +446,7 @@ func (builder *voltronRouteConfigBuilder) mountSecretReference(name, key string)
 		builder.mountedSecrets[name] = struct{}{}
 	}
 
-	return fmt.Sprintf("%s/%s/%s", configMapFolder, name, key), nil
+	return fmt.Sprintf("%s/%s/%s", secretsFolder, name, key), nil
 }
 
 // VoltronRouteConfig contains everything needed to configure the voltron pod / container with routes via a mounted file.
@@ -458,6 +461,18 @@ type VoltronRouteConfig struct {
 	volumes      []corev1.Volume
 	annotations  map[string]string
 }
+
+type ByVolumeMountName []corev1.VolumeMount
+
+func (m ByVolumeMountName) Len() int           { return len(m) }
+func (m ByVolumeMountName) Less(i, j int) bool { return m[i].Name < m[j].Name }
+func (m ByVolumeMountName) Swap(i, j int)      { m[i], m[j] = m[j], m[i] }
+
+type ByVolumeName []corev1.Volume
+
+func (m ByVolumeName) Len() int           { return len(m) }
+func (m ByVolumeName) Less(i, j int) bool { return m[i].Name < m[j].Name }
+func (m ByVolumeName) Swap(i, j int)      { m[i], m[j] = m[j], m[i] }
 
 // Volumes returns the volumes that Voltron needs to be configured with (references to ConfigMaps and Secrets in the
 // TLSTerminatedRoute CRs).

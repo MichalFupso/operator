@@ -86,7 +86,7 @@ func (c *windowsComponent) ResolveImages(is *operatorv1.ImageSet) error {
 	}
 
 	if len(errMsgs) != 0 {
-		return fmt.Errorf(strings.Join(errMsgs, ","))
+		return fmt.Errorf("%s", strings.Join(errMsgs, ","))
 	}
 	return nil
 }
@@ -562,7 +562,6 @@ func (c *windowsComponent) windowsEnvVars() []corev1.EnvVar {
 		{Name: "FELIX_TYPHACAFILE", Value: c.cfg.TLS.TrustedBundle.MountPath()},
 		{Name: "FELIX_TYPHACERTFILE", Value: c.cfg.TLS.NodeSecret.VolumeMountCertificateFilePath()},
 		{Name: "FELIX_TYPHAKEYFILE", Value: c.cfg.TLS.NodeSecret.VolumeMountKeyFilePath()},
-		{Name: "FIPS_MODE_ENABLED", Value: operatorv1.IsFIPSModeEnabledString(c.cfg.Installation.FIPSMode)},
 		{Name: "VXLAN_VNI", Value: fmt.Sprintf("%d", c.cfg.VXLANVNI)},
 		{Name: "VXLAN_ADAPTER", Value: vxlanAdapter},
 	}
@@ -881,9 +880,12 @@ func (c *windowsComponent) windowsDaemonset(cniCfgMap *corev1.ConfigMap) *appsv1
 		ds.Spec.Template.Spec.InitContainers = append(ds.Spec.Template.Spec.InitContainers, c.cniContainer())
 	}
 
+	setNodeCriticalPod(&(ds.Spec.Template))
+
 	if overrides := c.cfg.Installation.CalicoNodeWindowsDaemonSet; overrides != nil {
 		rcomp.ApplyDaemonSetOverrides(&ds, overrides)
 	}
+
 	return &ds
 }
 

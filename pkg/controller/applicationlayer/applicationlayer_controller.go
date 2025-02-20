@@ -1,4 +1,4 @@
-// Copyright (c) 2021-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2021-2025 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,11 +29,13 @@ import (
 	"github.com/tigera/operator/pkg/ctrlruntime"
 	"github.com/tigera/operator/pkg/render"
 	"github.com/tigera/operator/pkg/render/applicationlayer"
-	"github.com/tigera/operator/pkg/render/applicationlayer/embed"
+	"github.com/tigera/operator/pkg/render/applicationlayer/ruleset"
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
 
+	admregv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -113,19 +115,27 @@ func add(mgr manager.Manager, c ctrlruntime.Controller) error {
 		return fmt.Errorf("applicationlayer-controller failed to watch Tigera network resource: %v", err)
 	}
 
-	// Watch for configmap changes in tigera-operator namespace; the cm contains ruleset for ModSecurity library:
-	err = utils.AddConfigMapWatch(c, applicationlayer.ModSecurityRulesetConfigMapName, common.OperatorNamespace(), &handler.EnqueueRequestForObject{})
+	// Watch for configmap changes in tigera-operator namespace; the cm contains config for Coraza library:
+	err = utils.AddConfigMapWatch(c, applicationlayer.WAFRulesetConfigMapName, common.OperatorNamespace(), &handler.EnqueueRequestForObject{})
 	if err != nil {
 		return fmt.Errorf(
 			"applicationlayer-controller failed to watch ConfigMap %s: %v",
-			applicationlayer.ModSecurityRulesetConfigMapName, err,
+			applicationlayer.WAFRulesetConfigMapName, err,
 		)
+	}
+
+	// Watch mutatingwebhookconfiguration responsible for sidecar injetion
+	err = c.WatchObject(&admregv1.MutatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{Name: common.SidecarMutatingWebhookConfigName}},
+		&handler.EnqueueRequestForObject{})
+	if err != nil {
+		return fmt.Errorf("applicationlayer-controller failed to watch sidecar MutatingWebhookConfiguration resource: %w", err)
 	}
 
 	// Watch configmaps created for envoy and dikastes in calico-system namespace:
 	maps := []string{
 		applicationlayer.EnvoyConfigMapName,
-		applicationlayer.ModSecurityRulesetConfigMapName,
+		applicationlayer.WAFRulesetConfigMapName,
+		applicationlayer.DefaultCoreRuleset,
 	}
 	for _, configMapName := range maps {
 		if err = utils.AddConfigMapWatch(c, configMapName, common.CalicoNamespace, &handler.EnqueueRequestForObject{}); err != nil {
@@ -232,12 +242,6 @@ func (r *ReconcileApplicationLayer) Reconcile(ctx context.Context, request recon
 		return reconcile.Result{}, nil
 	}
 
-	if operatorv1.IsFIPSModeEnabled(installation.FIPSMode) {
-		msg := errors.New("ApplicationLayer features cannot be used in combination with FIPSMode=Enabled")
-		r.status.SetDegraded(operatorv1.ResourceValidationError, msg.Error(), nil, reqLogger)
-		return reconcile.Result{}, nil
-	}
-
 	pullSecrets, err := utils.GetNetworkingPullSecrets(installation, r.client)
 	if err != nil {
 		r.status.SetDegraded(operatorv1.ResourceReadError, "Error retrieving pull secrets", err, reqLogger)
@@ -250,33 +254,40 @@ func (r *ReconcileApplicationLayer) Reconcile(ctx context.Context, request recon
 		return reconcile.Result{}, err
 	}
 
-	var passthroughModSecurityRuleSet bool
-	var modSecurityRuleSet *corev1.ConfigMap
-	if r.isWAFEnabled(&instance.Spec) {
-		if modSecurityRuleSet, passthroughModSecurityRuleSet, err = r.getModSecurityRuleSet(ctx); err != nil {
-			r.status.SetDegraded(operatorv1.ResourceReadError, "Error getting Web Application Firewall ModSecurity rule set", err, reqLogger)
+	var passthroughWAFRulesetConfig bool
+	var wafRulesetConfig, defaultCoreRuleSet *corev1.ConfigMap
+	if r.isWAFEnabled(&instance.Spec) || r.isSidecarInjectionEnabled(&instance.Spec) {
+		if defaultCoreRuleSet, err = ruleset.GetOWASPCoreRuleSet(); err != nil {
+			r.status.SetDegraded(operatorv1.ResourceReadError, "Error getting Web Application Firewall OWASP core ruleset", err, reqLogger)
 			return reconcile.Result{}, err
 		}
-		if err = validateModSecurityRuleSet(modSecurityRuleSet); err != nil {
-			r.status.SetDegraded(operatorv1.ResourceValidationError, "Error validating Web Application Firewall rule set", err, reqLogger)
+
+		if wafRulesetConfig, passthroughWAFRulesetConfig, err = r.getWAFRulesetConfig(ctx); err != nil {
+			r.status.SetDegraded(operatorv1.ResourceReadError, "Error getting Web Application Firewall ruleset config", err, reqLogger)
+			return reconcile.Result{}, err
+		}
+		if err = ruleset.ValidateWAFRulesetConfig(wafRulesetConfig); err != nil {
+			r.status.SetDegraded(operatorv1.ResourceValidationError, "Error validating Web Application Firewall ruleset config", err, reqLogger)
 			return reconcile.Result{}, err
 		}
 	}
 
 	lcSpec := instance.Spec.LogCollection
 	config := &applicationlayer.Config{
-		PullSecrets:            pullSecrets,
-		Installation:           installation,
-		OsType:                 rmeta.OSTypeLinux,
-		WAFEnabled:             r.isWAFEnabled(&instance.Spec),
-		LogsEnabled:            r.isLogsCollectionEnabled(&instance.Spec),
-		ALPEnabled:             r.isALPEnabled(&instance.Spec),
-		LogRequestsPerInterval: lcSpec.LogRequestsPerInterval,
-		LogIntervalSeconds:     lcSpec.LogIntervalSeconds,
-		ModSecurityConfigMap:   modSecurityRuleSet,
-		UseRemoteAddressXFF:    instance.Spec.EnvoySettings.UseRemoteAddress,
-		NumTrustedHopsXFF:      instance.Spec.EnvoySettings.XFFNumTrustedHops,
-		ApplicationLayer:       instance,
+		PullSecrets:                 pullSecrets,
+		Installation:                installation,
+		OsType:                      rmeta.OSTypeLinux,
+		PerHostWAFEnabled:           r.isWAFEnabled(&instance.Spec),
+		PerHostLogsEnabled:          r.isLogsCollectionEnabled(&instance.Spec),
+		PerHostALPEnabled:           r.isALPEnabled(&instance.Spec),
+		SidecarInjectionEnabled:     r.isSidecarInjectionEnabled(&instance.Spec),
+		LogRequestsPerInterval:      lcSpec.LogRequestsPerInterval,
+		LogIntervalSeconds:          lcSpec.LogIntervalSeconds,
+		WAFRulesetConfigMap:         wafRulesetConfig,
+		DefaultCoreRulesetConfigMap: defaultCoreRuleSet,
+		UseRemoteAddressXFF:         instance.Spec.EnvoySettings.UseRemoteAddress,
+		NumTrustedHopsXFF:           instance.Spec.EnvoySettings.XFFNumTrustedHops,
+		ApplicationLayer:            instance,
 	}
 	component := applicationlayer.ApplicationLayer(config)
 
@@ -287,8 +298,8 @@ func (r *ReconcileApplicationLayer) Reconcile(ctx context.Context, request recon
 		return reconcile.Result{}, err
 	}
 
-	if passthroughModSecurityRuleSet {
-		err = ch.CreateOrUpdateOrDelete(ctx, render.NewPassthrough(modSecurityRuleSet), r.status)
+	if passthroughWAFRulesetConfig {
+		err = ch.CreateOrUpdateOrDelete(ctx, render.NewPassthrough(wafRulesetConfig), r.status)
 		if err != nil {
 			r.status.SetDegraded(operatorv1.ResourceUpdateError, "Error creating / updating resource", err, reqLogger)
 			return reconcile.Result{}, err
@@ -310,6 +321,18 @@ func (r *ReconcileApplicationLayer) Reconcile(ctx context.Context, request recon
 		return reconcile.Result{RequeueAfter: utils.StandardRetry}, nil
 	}
 
+	err = r.client.Get(ctx, types.NamespacedName{Name: common.SidecarMutatingWebhookConfigName}, &admregv1.MutatingWebhookConfiguration{})
+	if err != nil {
+		sidecarWebhookDisabled := operatorv1.SidecarWebhookStateDisabled
+		instance.Status.SidecarWebhook = &sidecarWebhookDisabled
+		if !apierrors.IsNotFound(err) {
+			return reconcile.Result{}, err
+		}
+	} else {
+		sidecarWebhookEnabled := operatorv1.SidecarWebhookStateEnabled
+		instance.Status.SidecarWebhook = &sidecarWebhookEnabled
+	}
+
 	// Everything is available - update the CRD status.
 	instance.Status.State = operatorv1.TigeraStatusReady
 	if err = r.client.Status().Update(ctx, instance); err != nil {
@@ -327,6 +350,8 @@ func updateApplicationLayerWithDefaults(al *operatorv1.ApplicationLayer) {
 		defaultLogCollectionStatusType          operatorv1.LogCollectionStatusType          = operatorv1.L7LogCollectionDisabled
 		defaultWebApplicationFirewallStatusType operatorv1.WAFStatusType                    = operatorv1.WAFDisabled
 		defaultApplicationLayerPolicyStatusType operatorv1.ApplicationLayerPolicyStatusType = operatorv1.ApplicationLayerPolicyDisabled
+		defaultSidecarStatusType                operatorv1.SidecarStatusType                = operatorv1.SidecarDisabled
+		defaultSidecarWebhookStateType          operatorv1.SidecarWebhookStateType          = operatorv1.SidecarWebhookStateDisabled
 	)
 
 	if al.Spec.LogCollection == nil {
@@ -360,6 +385,14 @@ func updateApplicationLayerWithDefaults(al *operatorv1.ApplicationLayer) {
 			XFFNumTrustedHops: 0,
 		}
 	}
+
+	if al.Spec.SidecarInjection == nil {
+		al.Spec.SidecarInjection = &defaultSidecarStatusType
+	}
+
+	if al.Status.SidecarWebhook == nil {
+		al.Status.SidecarWebhook = &defaultSidecarWebhookStateType
+	}
 }
 
 // validateApplicationLayer validates ApplicationLayer
@@ -380,65 +413,43 @@ func validateApplicationLayer(al *operatorv1.ApplicationLayer) error {
 		log.Info("L7 ALP found enabled")
 		atLeastOneFeatureDetected = true
 	}
+
+	if *al.Spec.SidecarInjection == operatorv1.SidecarEnabled {
+		log.Info("L7 SidecarInjection found enabled")
+		atLeastOneFeatureDetected = true
+	}
 	// If ApplicationLayer spec exists then one of its features should be set.
 	if !atLeastOneFeatureDetected {
-		return errors.New("at least one of webApplicationFirewall, policy.Mode or logCollection.collectLogs must be specified in ApplicationLayer resource")
+		return errors.New("at least one of webApplicationFirewall, policy.Mode, logCollection.collectLogs or sidecarInjection must be specified in ApplicationLayer resource")
 	}
 
 	return nil
 }
 
-// getModSecurityRuleSet returns 'owasp-ruleset-config' ConfigMap from calico-operator namespace.
-// The ConfigMap is meant to contain rule set files for ModSecurity library.
-// If the ConfigMap does not exist a ConfigMap with OWASP provided Core Rule Set will be returned.
-// The rule set was cloned from https://github.com/coreruleset/coreruleset/
-func (r *ReconcileApplicationLayer) getModSecurityRuleSet(ctx context.Context) (*corev1.ConfigMap, bool, error) {
-	ruleset := new(corev1.ConfigMap)
+// getWAFRulesetConfig returns 'tigera-coreruleset-config' ConfigMap from calico-operator namespace.
+// The ConfigMap is meant to contain the configuration for the Coraza library.
+// If the ConfigMap does not exist a ConfigMap with the Tigera ruleset config will be returned.
+func (r *ReconcileApplicationLayer) getWAFRulesetConfig(ctx context.Context) (*corev1.ConfigMap, bool, error) {
+	cm := new(corev1.ConfigMap)
 
 	if err := r.client.Get(
 		ctx,
 		types.NamespacedName{
 			Namespace: common.OperatorNamespace(),
-			Name:      applicationlayer.ModSecurityRulesetConfigMapName,
+			Name:      applicationlayer.WAFRulesetConfigMapName,
 		},
-		ruleset,
+		cm,
 	); err == nil {
-		return ruleset, false, nil
+		return cm, false, nil
 	} else if !apierrors.IsNotFound(err) {
 		return nil, false, err
 	}
 
-	ruleset, err := getDefaultCoreRuleset(ctx)
+	cm, err := ruleset.GetWAFRulesetConfig()
 	if err != nil {
 		return nil, false, err
 	}
-	return ruleset, true, nil
-}
-
-func getDefaultCoreRuleset(ctx context.Context) (*corev1.ConfigMap, error) {
-	ruleset, err := embed.AsConfigMap(
-		applicationlayer.ModSecurityRulesetConfigMapName,
-		common.OperatorNamespace(),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return ruleset, nil
-}
-
-func validateModSecurityRuleSet(cm *corev1.ConfigMap) error {
-	requiredFiles := []string{
-		"tigera.conf",
-	}
-
-	for _, f := range requiredFiles {
-		if _, ok := cm.Data[f]; !ok {
-			return fmt.Errorf("file must be present with ruleset files: %s", f)
-		}
-	}
-
-	return nil
+	return cm, true, nil
 }
 
 // getApplicationLayer returns the default ApplicationLayer instance.
@@ -467,6 +478,11 @@ func (r *ReconcileApplicationLayer) isWAFEnabled(applicationLayerSpec *operatorv
 		*applicationLayerSpec.WebApplicationFirewall == operatorv1.WAFEnabled
 }
 
+func (r *ReconcileApplicationLayer) isSidecarInjectionEnabled(applicationLayerSpec *operatorv1.ApplicationLayerSpec) bool {
+	return applicationLayerSpec.SidecarInjection != nil &&
+		*applicationLayerSpec.SidecarInjection == operatorv1.SidecarEnabled
+}
+
 func (r *ReconcileApplicationLayer) getPolicySyncPathPrefix(fcSpec *crdv1.FelixConfigurationSpec, al *operatorv1.ApplicationLayer) string {
 	// Respect existing policySyncPathPrefix if it's already set (e.g. EGW)
 	// This will cause policySyncPathPrefix value to remain when ApplicationLayer is disabled.
@@ -482,7 +498,8 @@ func (r *ReconcileApplicationLayer) getPolicySyncPathPrefix(fcSpec *crdv1.FelixC
 
 	// No existing value. However, at least one of the applicationLayer features are enabled
 	spec := &al.Spec
-	if r.isALPEnabled(spec) || r.isWAFEnabled(spec) || r.isLogsCollectionEnabled(spec) {
+	if r.isALPEnabled(spec) || r.isWAFEnabled(spec) || r.isLogsCollectionEnabled(spec) ||
+		r.isSidecarInjectionEnabled(spec) {
 		return DefaultPolicySyncPrefix
 	}
 	return ""
@@ -532,19 +549,24 @@ func (r *ReconcileApplicationLayer) patchFelixConfiguration(ctx context.Context,
 		policySyncPrefix := r.getPolicySyncPathPrefix(&fc.Spec, al)
 		policySyncPrefixSetDesired := fc.Spec.PolicySyncPathPrefix == policySyncPrefix
 		tproxyModeSetDesired := fc.Spec.TPROXYMode != nil && *fc.Spec.TPROXYMode == tproxyMode
+		wafEventLogsFileEnabled := al != nil && ((al.Spec.SidecarInjection != nil && *al.Spec.SidecarInjection == operatorv1.SidecarEnabled) ||
+			(al.Spec.WebApplicationFirewall != nil && *al.Spec.WebApplicationFirewall == operatorv1.WAFEnabled))
+		wafEventLogsFileEnabledDesired := fc.Spec.WAFEventLogsFileEnabled != nil && *fc.Spec.WAFEventLogsFileEnabled == wafEventLogsFileEnabled
 
 		// If tproxy mode is already set to desired state return false to indicate patch not needed.
-		if policySyncPrefixSetDesired && tproxyModeSetDesired {
+		if policySyncPrefixSetDesired && tproxyModeSetDesired && wafEventLogsFileEnabledDesired {
 			return false, nil
 		}
 
 		fc.Spec.TPROXYMode = &tproxyMode
 		fc.Spec.PolicySyncPathPrefix = policySyncPrefix
+		fc.Spec.WAFEventLogsFileEnabled = &wafEventLogsFileEnabled
 
 		log.Info(
 			"Patching FelixConfiguration: ",
 			"policySyncPathPrefix", fc.Spec.PolicySyncPathPrefix,
 			"tproxyMode", string(tproxyMode),
+			"wafEventLogsFileEnabled", wafEventLogsFileEnabled,
 		)
 		return true, nil
 	})

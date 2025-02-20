@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2019-2025 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,28 +21,28 @@ import (
 	"strings"
 	"time"
 
-	rbacv1 "k8s.io/api/rbac/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	//"github.com/operator-framework/operator-sdk/pkg/restmapper"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	kerror "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	rconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	operator "github.com/tigera/operator/api/v1"
-	"github.com/tigera/operator/controllers"
+	"github.com/tigera/operator/internal/controller"
 	"github.com/tigera/operator/pkg/apis"
 	crdv1 "github.com/tigera/operator/pkg/apis/crd.projectcalico.org/v1"
 	"github.com/tigera/operator/pkg/common"
@@ -315,8 +315,11 @@ func setupManager(manageCRDs bool, multiTenant bool) (client.Client, context.Con
 	Expect(err).NotTo(HaveOccurred())
 
 	// Create a manager to use in the tests.
+	skipNameValidation := true
 	mgr, err := manager.New(cfg, manager.Options{
-		MetricsBindAddress: "0",
+		Metrics: server.Options{
+			BindAddress: "0",
+		},
 		// Upgrade notes fro v0.14.0 (https://sdk.operatorframework.io/docs/upgrading-sdk-version/version-upgrade-guide/#v014x)
 		// say to replace restmapper but the NewDynamicRestMapper did not satisfy the
 		// MapperProvider interface
@@ -325,6 +328,9 @@ func setupManager(manageCRDs bool, multiTenant bool) (client.Client, context.Con
 		// was not updating and tests were failing as a result of looking at stale cluster state
 		NewClient: newNonCachingClient,
 		Client:    client.Options{},
+		Controller: rconfig.Controller{
+			SkipNameValidation: &skipNameValidation,
+		},
 	})
 	Expect(err).NotTo(HaveOccurred())
 
@@ -337,7 +343,7 @@ func setupManager(manageCRDs bool, multiTenant bool) (client.Client, context.Con
 	ctx, cancel := context.WithCancel(context.TODO())
 
 	// Setup all Controllers
-	err = controllers.AddToManager(mgr, options.AddOptions{
+	err = controller.AddToManager(mgr, options.AddOptions{
 		DetectedProvider:    operator.ProviderNone,
 		EnterpriseCRDExists: true,
 		ManageCRDs:          manageCRDs,

@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2020-2025 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -69,12 +69,12 @@ var (
 	}
 
 	ComponentEckElasticsearch = Component{
-		Version:  "7.17.22",
+		Version:  "8.17.1",
 		Registry: "",
 	}
 
 	ComponentEckKibana = Component{
-		Version:  "7.17.22",
+		Version:  "8.17.1",
 		Registry: "",
 	}
 
@@ -90,14 +90,8 @@ var (
 		Registry: "",
 	}
 
-	ComponentElasticsearchFIPS = Component{
-		Version:  "master-fips",
-		Image:    "tigera/elasticsearch",
-		Registry: "",
-	}
-
 	ComponentECKElasticsearchOperator = Component{
-		Version:  "2.6.1",
+		Version:  "2.16.0",
 		Registry: "",
 	}
 
@@ -107,9 +101,9 @@ var (
 		Registry: "",
 	}
 
-	ComponentEsProxy = Component{
+	ComponentUIAPIs = Component{
 		Version:  "master",
-		Image:    "tigera/es-proxy",
+		Image:    "tigera/ui-apis",
 		Registry: "",
 	}
 
@@ -215,8 +209,14 @@ var (
 		Registry: "",
 	}
 
+	ComponentL7AdmissionController = Component{
+		Version:  "master",
+		Image:    "tigera/l7-admission-controller",
+		Registry: "",
+	}
+
 	ComponentCoreOSPrometheus = Component{
-		Version:  "v2.48.1",
+		Version:  "v2.54.1",
 		Registry: "",
 	}
 
@@ -233,7 +233,7 @@ var (
 	}
 
 	ComponentCoreOSAlertmanager = Component{
-		Version:  "v0.25.0",
+		Version:  "v0.28.0",
 		Registry: "",
 	}
 
@@ -279,12 +279,6 @@ var (
 		Registry: "",
 	}
 
-	ComponentTigeraCNIFIPS = Component{
-		Version:  "master-fips",
-		Image:    "tigera/cni",
-		Registry: "",
-	}
-
 	ComponentTigeraCNIWindows = Component{
 		Version:  "master",
 		Image:    "tigera/cni-windows",
@@ -314,6 +308,24 @@ var (
 		Image:    "tigera/node-driver-registrar",
 		Registry: "",
 	}
+
+	ComponentGatewayAPIEnvoyGateway = Component{
+		Version:  "master",
+		Image:    "tigera/envoy-gateway",
+		Registry: "",
+	}
+
+	ComponentGatewayAPIEnvoyProxy = Component{
+		Version:  "master",
+		Image:    "tigera/envoy-proxy",
+		Registry: "",
+	}
+
+	ComponentGatewayAPIEnvoyRatelimit = Component{
+		Version:  "master",
+		Image:    "tigera/envoy-ratelimit",
+		Registry: "",
+	}
 	// Only components that correspond directly to images should be included in this list,
 	// Components that are only for providing a version should be left out of this list.
 	EnterpriseImages = []Component{
@@ -327,9 +339,8 @@ var (
 		ComponentDeepPacketInspection,
 		ComponentElasticTseeInstaller,
 		ComponentElasticsearch,
-		ComponentElasticsearchFIPS,
 		ComponentElasticsearchOperator,
-		ComponentEsProxy,
+		ComponentUIAPIs,
 		ComponentFluentd,
 		ComponentFluentdWindows,
 		ComponentGuardian,
@@ -353,14 +364,17 @@ var (
 		ComponentTigeraNodeWindows,
 		ComponentTigeraTypha,
 		ComponentTigeraCNI,
-		ComponentTigeraCNIFIPS,
 		ComponentTigeraCNIWindows,
 		ComponentElasticsearchMetrics,
 		ComponentESGateway,
 		ComponentLinseed,
 		ComponentDikastes,
+		ComponentL7AdmissionController,
 		ComponentTigeraFlexVolume,
 		ComponentTigeraCSI,
 		ComponentTigeraCSINodeDriverRegistrar,
+		ComponentGatewayAPIEnvoyGateway,
+		ComponentGatewayAPIEnvoyProxy,
+		ComponentGatewayAPIEnvoyRatelimit,
 	}
 )

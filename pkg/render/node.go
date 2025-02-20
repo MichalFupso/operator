@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2019-2025 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -124,6 +124,10 @@ type NodeConfiguration struct {
 	// The bindMode read from the default BGPConfiguration. Used to trigger rolling updates
 	// should this value change.
 	BindMode string
+
+	FelixPrometheusMetricsEnabled bool
+
+	FelixPrometheusMetricsPort int
 }
 
 // Node creates the node daemonset and other resources for the daemonset to operate normally.
@@ -154,11 +158,7 @@ func (c *nodeComponent) ResolveImages(is *operatorv1.ImageSet) error {
 	}
 
 	if c.cfg.Installation.Variant == operatorv1.TigeraSecureEnterprise {
-		if operatorv1.IsFIPSModeEnabled(c.cfg.Installation.FIPSMode) {
-			c.cniImage = appendIfErr(components.GetReference(components.ComponentTigeraCNIFIPS, reg, path, prefix, is))
-		} else {
-			c.cniImage = appendIfErr(components.GetReference(components.ComponentTigeraCNI, reg, path, prefix, is))
-		}
+		c.cniImage = appendIfErr(components.GetReference(components.ComponentTigeraCNI, reg, path, prefix, is))
 		c.nodeImage = appendIfErr(components.GetReference(components.ComponentTigeraNode, reg, path, prefix, is))
 		c.flexvolImage = appendIfErr(components.GetReference(components.ComponentTigeraFlexVolume, reg, path, prefix, is))
 	} else {
@@ -173,7 +173,7 @@ func (c *nodeComponent) ResolveImages(is *operatorv1.ImageSet) error {
 	}
 
 	if len(errMsgs) != 0 {
-		return fmt.Errorf(strings.Join(errMsgs, ","))
+		return fmt.Errorf("%s", strings.Join(errMsgs, ","))
 	}
 	return nil
 }
@@ -398,6 +398,12 @@ func (c *nodeComponent) nodeRole() *rbacv1.ClusterRole {
 				Verbs:     []string{"watch", "list"},
 			},
 			{
+				// For enforcing admin network policies.
+				APIGroups: []string{"policy.networking.k8s.io"},
+				Resources: []string{"adminnetworkpolicies", "baselineadminnetworkpolicies"},
+				Verbs:     []string{"watch", "list"},
+			},
+			{
 				// Metadata from these are used in conjunction with network policy.
 				APIGroups: []string{""},
 				Resources: []string{"pods", "namespaces", "serviceaccounts"},
@@ -426,24 +432,24 @@ func (c *nodeComponent) nodeRole() *rbacv1.ClusterRole {
 				// For monitoring Calico-specific configuration.
 				APIGroups: []string{"crd.projectcalico.org"},
 				Resources: []string{
-					"bgpfilters",
 					"bgpconfigurations",
-					"bgppeers",
 					"bgpfilters",
+					"bgpfilters",
+					"bgppeers",
 					"blockaffinities",
 					"clusterinformations",
 					"felixconfigurations",
 					"globalnetworkpolicies",
-					"stagedglobalnetworkpolicies",
 					"globalnetworksets",
 					"hostendpoints",
 					"ipamblocks",
 					"ippools",
 					"ipreservations",
 					"networkpolicies",
+					"networksets",
+					"stagedglobalnetworkpolicies",
 					"stagedkubernetesnetworkpolicies",
 					"stagednetworkpolicies",
-					"networksets",
 					"tiers",
 				},
 				Verbs: []string{"get", "list", "watch"},
@@ -497,8 +503,8 @@ func (c *nodeComponent) nodeRole() *rbacv1.ClusterRole {
 				Resources: []string{
 					"blockaffinities",
 					"ipamblocks",
-					"ipamhandles",
 					"ipamconfigs",
+					"ipamhandles",
 				},
 				Verbs: []string{"get", "list", "create", "update", "delete"},
 			},
@@ -519,17 +525,15 @@ func (c *nodeComponent) nodeRole() *rbacv1.ClusterRole {
 	if c.cfg.Installation.Variant == operatorv1.TigeraSecureEnterprise {
 		extraRules := []rbacv1.PolicyRule{
 			{
-				// Tigera Secure needs to be able to read licenses, tiers, and config.
+				// Calico Enterprise needs to be able to read additional resources.
 				APIGroups: []string{"crd.projectcalico.org"},
 				Resources: []string{
-					"externalnetworks",
+					"bfdconfigurations",
 					"egressgatewaypolicies",
+					"externalnetworks",
 					"licensekeys",
-					"remoteclusterconfigurations",
-					"stagedglobalnetworkpolicies",
-					"stagedkubernetesnetworkpolicies",
-					"stagednetworkpolicies",
 					"packetcaptures",
+					"remoteclusterconfigurations",
 				},
 				Verbs: []string{"get", "list", "watch"},
 			},
@@ -1435,7 +1439,6 @@ func (c *nodeComponent) nodeEnvVars() []corev1.EnvVar {
 		{Name: "FELIX_TYPHACAFILE", Value: c.cfg.TLS.TrustedBundle.MountPath()},
 		{Name: "FELIX_TYPHACERTFILE", Value: c.cfg.TLS.NodeSecret.VolumeMountCertificateFilePath()},
 		{Name: "FELIX_TYPHAKEYFILE", Value: c.cfg.TLS.NodeSecret.VolumeMountKeyFilePath()},
-		{Name: "FIPS_MODE_ENABLED", Value: operatorv1.IsFIPSModeEnabledString(c.cfg.Installation.FIPSMode)},
 		{Name: "NO_DEFAULT_POOLS", Value: "true"},
 	}
 
@@ -1659,7 +1662,7 @@ func (c *nodeComponent) nodeEnvVars() []corev1.EnvVar {
 		*c.cfg.Installation.CalicoNetwork.LinuxPolicySetupTimeoutSeconds > 0 {
 		nodeEnv = append(nodeEnv, corev1.EnvVar{
 			Name:  "FELIX_ENDPOINTSTATUSPATHPREFIX",
-			Value: c.varRunCalicoVolume().VolumeSource.HostPath.Path,
+			Value: "/var/run/calico",
 		})
 	}
 
@@ -1715,6 +1718,32 @@ func (c *nodeComponent) nodeLivenessReadinessProbes() (*corev1.Probe, *corev1.Pr
 // This service is used internally by Calico Enterprise and is separate from general
 // Prometheus metrics which are user-configurable.
 func (c *nodeComponent) nodeMetricsService() *corev1.Service {
+	ports := []corev1.ServicePort{
+		{
+			Name:       "calico-metrics-port",
+			Port:       int32(c.cfg.NodeReporterMetricsPort),
+			TargetPort: intstr.FromInt(c.cfg.NodeReporterMetricsPort),
+			Protocol:   corev1.ProtocolTCP,
+		},
+		{
+			Name:       "calico-bgp-metrics-port",
+			Port:       nodeBGPReporterPort,
+			TargetPort: intstr.FromInt(int(nodeBGPReporterPort)),
+			Protocol:   corev1.ProtocolTCP,
+		},
+	}
+
+	if c.cfg.FelixPrometheusMetricsEnabled {
+		felixMetricsPort := int32(c.cfg.FelixPrometheusMetricsPort)
+
+		ports = append(ports, corev1.ServicePort{
+			Name:       "felix-metrics-port",
+			Port:       felixMetricsPort,
+			TargetPort: intstr.FromInt(int(felixMetricsPort)),
+			Protocol:   corev1.ProtocolTCP,
+		})
+	}
+
 	return &corev1.Service{
 		TypeMeta: metav1.TypeMeta{Kind: "Service", APIVersion: "v1"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -1729,20 +1758,7 @@ func (c *nodeComponent) nodeMetricsService() *corev1.Service {
 			// a huge set of iptables rules for this service since there's an instance
 			// on every node.
 			ClusterIP: "None",
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "calico-metrics-port",
-					Port:       int32(c.cfg.NodeReporterMetricsPort),
-					TargetPort: intstr.FromInt(c.cfg.NodeReporterMetricsPort),
-					Protocol:   corev1.ProtocolTCP,
-				},
-				{
-					Name:       "calico-bgp-metrics-port",
-					Port:       nodeBGPReporterPort,
-					TargetPort: intstr.FromInt(int(nodeBGPReporterPort)),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
+			Ports:     ports,
 		},
 	}
 }

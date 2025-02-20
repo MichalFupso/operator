@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2024 Tigera, Inc. All rights reserved.
+// Copyright (c) 2020-2025 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -49,6 +49,7 @@ import (
 	"github.com/tigera/operator/pkg/dns"
 	"github.com/tigera/operator/pkg/render"
 	rcertificatemanagement "github.com/tigera/operator/pkg/render/certificatemanagement"
+	"github.com/tigera/operator/pkg/render/common/authentication"
 	rmeta "github.com/tigera/operator/pkg/render/common/meta"
 	"github.com/tigera/operator/pkg/render/common/networkpolicy"
 	"github.com/tigera/operator/pkg/render/monitor"
@@ -99,6 +100,7 @@ func newReconciler(mgr manager.Manager, opts options.AddOptions) *ReconcileAPISe
 		clusterDomain:       opts.ClusterDomain,
 		tierWatchReady:      &utils.ReadyFlag{},
 		multiTenant:         opts.MultiTenant,
+		kubernetesVersion:   opts.KubernetesVersion,
 	}
 	r.status.Run(opts.ShutdownContext)
 	return r
@@ -123,6 +125,12 @@ func add(c ctrlruntime.Controller, r *ReconcileAPIServer) error {
 	}
 
 	if r.enterpriseCRDsExist {
+		// Watch for changes to ApplicationLayer
+		err = c.WatchObject(&operatorv1.ApplicationLayer{ObjectMeta: metav1.ObjectMeta{Name: utils.DefaultTSEEInstanceKey.Name}}, &handler.EnqueueRequestForObject{})
+		if err != nil {
+			return fmt.Errorf("apiserver-controller failed to watch ApplicationLayer resource: %v", err)
+		}
+
 		// Watch for changes to primary resource ManagementCluster
 		err = c.WatchObject(&operatorv1.ManagementCluster{}, &handler.EnqueueRequestForObject{})
 		if err != nil {
@@ -195,6 +203,7 @@ type ReconcileAPIServer struct {
 	clusterDomain       string
 	tierWatchReady      *utils.ReadyFlag
 	multiTenant         bool
+	kubernetesVersion   *common.VersionInfo
 }
 
 // Reconcile reads that state of the cluster for a APIServer object and makes changes based on the state read
@@ -283,10 +292,19 @@ func (r *ReconcileAPIServer) Reconcile(ctx context.Context, request reconcile.Re
 	// Query enterprise-only data.
 	var tunnelCAKeyPair certificatemanagement.KeyPairInterface
 	var trustedBundle certificatemanagement.TrustedBundle
+	var applicationLayer *operatorv1.ApplicationLayer
 	var managementCluster *operatorv1.ManagementCluster
 	var managementClusterConnection *operatorv1.ManagementClusterConnection
+	var keyValidatorConfig authentication.KeyValidatorConfig
 	includeV3NetworkPolicy := false
 	if installationSpec.Variant == operatorv1.TigeraSecureEnterprise {
+		trustedBundle = certificateManager.CreateTrustedBundle()
+		applicationLayer, err = utils.GetApplicationLayer(ctx, r.client)
+		if err != nil {
+			r.status.SetDegraded(operatorv1.ResourceReadError, "Error reading ApplicationLayer", err, reqLogger)
+			return reconcile.Result{}, err
+		}
+
 		managementCluster, err = utils.GetManagementCluster(ctx, r.client)
 		if err != nil {
 			r.status.SetDegraded(operatorv1.ResourceReadError, "Error reading ManagementCluster", err, reqLogger)
@@ -347,7 +365,41 @@ func (r *ReconcileAPIServer) Reconcile(ctx context.Context, request reconcile.Re
 			r.status.SetDegraded(operatorv1.ResourceReadError, "Failed to get certificate", err, reqLogger)
 			return reconcile.Result{}, err
 		} else if prometheusCertificate != nil {
-			trustedBundle = certificatemanagement.CreateTrustedBundle(prometheusCertificate)
+			trustedBundle.AddCertificates(prometheusCertificate)
+		}
+
+		var authenticationCR *operatorv1.Authentication
+		// Fetch the Authentication spec. If present, we use it to configure user authentication.
+		authenticationCR, err = utils.GetAuthentication(ctx, r.client)
+		if err != nil && !errors.IsNotFound(err) {
+			r.status.SetDegraded(operatorv1.ResourceReadError, "Error while fetching Authentication", err, reqLogger)
+			return reconcile.Result{}, err
+		}
+
+		if authenticationCR != nil && authenticationCR.Status.State == operatorv1.TigeraStatusReady {
+			if utils.DexEnabled(authenticationCR) {
+				// Do not include DEX TLS Secret Name if authentication CR does not have type Dex
+				secret := render.DexTLSSecretName
+				certificate, err := certificateManager.GetCertificate(r.client, secret, common.OperatorNamespace())
+				if err != nil {
+					r.status.SetDegraded(operatorv1.CertificateError, fmt.Sprintf("Failed to retrieve %s", secret),
+						err, reqLogger)
+					return reconcile.Result{}, err
+				} else if certificate == nil {
+					reqLogger.Info(fmt.Sprintf("Waiting for secret '%s' to become available", secret))
+					r.status.SetDegraded(operatorv1.ResourceNotReady,
+						fmt.Sprintf("Waiting for secret '%s' to become available", secret),
+						nil, reqLogger)
+					return reconcile.Result{}, nil
+				}
+				trustedBundle.AddCertificates(certificate)
+			}
+
+			keyValidatorConfig, err = utils.GetKeyValidatorConfig(ctx, r.client, authenticationCR, r.clusterDomain)
+			if err != nil {
+				r.status.SetDegraded(operatorv1.ResourceReadError, "Failed to get KeyValidator Config", err, reqLogger)
+				return reconcile.Result{}, err
+			}
 		}
 	}
 
@@ -374,6 +426,7 @@ func (r *ReconcileAPIServer) Reconcile(ctx context.Context, request reconcile.Re
 		Installation:                installationSpec,
 		APIServer:                   &instance.Spec,
 		ForceHostNetwork:            false,
+		ApplicationLayer:            applicationLayer,
 		ManagementCluster:           managementCluster,
 		ManagementClusterConnection: managementClusterConnection,
 		TLSKeyPair:                  tlsSecret,
@@ -381,6 +434,8 @@ func (r *ReconcileAPIServer) Reconcile(ctx context.Context, request reconcile.Re
 		OpenShift:                   r.provider.IsOpenShift(),
 		TrustedBundle:               trustedBundle,
 		MultiTenant:                 r.multiTenant,
+		KeyValidatorConfig:          keyValidatorConfig,
+		KubernetesVersion:           r.kubernetesVersion,
 	}
 
 	component, err := render.APIServer(&apiServerCfg)
